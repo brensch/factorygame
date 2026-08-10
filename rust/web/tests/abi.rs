@@ -134,6 +134,44 @@ fn refused_commands_report_err_and_change_nothing() {
 }
 
 #[test]
+fn flows_report_ok_open_and_bad_connections() {
+    call(boot(42));
+    let drill = hand(&out_string()).iter().position(|m| m == "drill").unwrap();
+    let s = call(play(drill as u32, 0, 3, E, -1, -1));
+    // Drill pointing at an empty tile: an unfinished line, not an error.
+    assert!(
+        s.contains("\"fx\":0,\"fy\":3,\"tx\":1,\"ty\":3,\"d\":\"E\",\"status\":\"open\""),
+        "{s}"
+    );
+
+    // Belt behind it pointing INTO the drill: extractors never accept — bad.
+    let s = call(belt(1, 3, 3 /* west */));
+    assert!(
+        s.contains("\"fx\":1,\"fy\":3,\"tx\":0,\"ty\":3,\"d\":\"W\",\"status\":\"bad\""),
+        "{s}"
+    );
+
+    // Re-aim the belt east at a furnace: ore into a furnace recipe — ok.
+    call(sell(1, 3));
+    call(belt(1, 3, E));
+    let furnace = hand(&out_string()).iter().position(|m| m == "furnace").unwrap();
+    let s = call(play(furnace as u32, 2, 3, E, -1, -1));
+    assert!(
+        s.contains("\"fx\":1,\"fy\":3,\"tx\":2,\"ty\":3,\"d\":\"E\",\"status\":\"ok\""),
+        "{s}"
+    );
+
+    // Aim the drill off the board: bad.
+    call(rotate(0, 3)); // E -> S
+    call(rotate(0, 3)); // S -> W
+    let s = call(state());
+    assert!(
+        s.contains("\"fx\":0,\"fy\":3,\"tx\":-1,\"ty\":3,\"d\":\"W\",\"status\":\"bad\""),
+        "{s}"
+    );
+}
+
+#[test]
 fn catalog_carries_recipes_auras_and_values() {
     let s = call(catalog());
     // recipe data straight from defs.rs

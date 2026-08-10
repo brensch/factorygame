@@ -539,6 +539,70 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         g.deck.discard_count()
     );
 
+    // The flow graph: every output edge on the board, and whether the tile it
+    // points at can actually take items from it. This is what lets the
+    // renderer draw belts as connected paths and flag misrouted arrows,
+    // without owning any routing rules.
+    //   ok:   the target accepts (transport, vault, or a compatible recipe)
+    //   open: points at an empty tile — an unfinished line, not an error
+    //   bad:  off the board, or a machine that will never take this item
+    s.push_str("\"flows\":[");
+    let mut first = true;
+    for p in &g.board {
+        let d = def(p.m);
+        let emitter = d.transport || d.produces.is_some() || d.recipe.is_some();
+        if !emitter {
+            continue;
+        }
+        // What this tile is known to emit; None for transport (cargo unknown).
+        let emitted = d.produces.or(d.recipe.as_ref().map(|r| r.output));
+        let mut edges: Vec<(Dir, bool)> = Vec::new();
+        if let Some(dir) = p.d {
+            edges.push((dir, false));
+        }
+        if matches!(p.m, MachineId::Filter | MachineId::Splitter) {
+            if let Some(d2) = p.d2 {
+                edges.push((d2, true));
+            }
+        }
+        for (dir, secondary) in edges {
+            let (dx, dy) = dir.delta();
+            let (tx, ty) = (p.x + dx, p.y + dy);
+            let status = if tx < 0 || ty < 0 || tx >= BOARD_W || ty >= BOARD_H {
+                "bad"
+            } else {
+                match g.board.iter().find(|q| q.x == tx && q.y == ty) {
+                    None => "open",
+                    Some(q) => {
+                        let qd = def(q.m);
+                        if qd.kind == Kind::Vault || qd.transport {
+                            "ok"
+                        } else if let Some(r) = &qd.recipe {
+                            match emitted {
+                                Some(t) if !r.inputs.contains(&t) => "bad",
+                                _ => "ok",
+                            }
+                        } else {
+                            "bad" // extractor or pure-aura modifier: never accepts
+                        }
+                    }
+                }
+            };
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            let _ = write!(
+                s,
+                "{{\"fx\":{},\"fy\":{},\"tx\":{tx},\"ty\":{ty},\"d\":\"{}\",\"status\":\"{status}\",\"secondary\":{secondary}}}",
+                p.x,
+                p.y,
+                dir_key(dir)
+            );
+        }
+    }
+    s.push_str("],");
+
     // Tiles receiving an aura, so the renderer can halo them without ever
     // knowing the adjacency rules itself.
     s.push_str("\"auras\":[");

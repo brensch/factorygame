@@ -28,7 +28,13 @@ interface State {
   deckDraw: number; deckDiscard: number;
   nextQuota: number | null; nextAudit: boolean;
   auras: { x: number; y: number }[];
+  flows: Flow[];
   last: Outcome | null; err: string | null;
+}
+/** One output edge on the board, with the core's verdict on the connection. */
+interface Flow {
+  fx: number; fy: number; tx: number; ty: number;
+  d: Dir; status: "ok" | "open" | "bad"; secondary: boolean;
 }
 interface Frame {
   tick: number; total: number; payout: number; done: boolean;
@@ -87,8 +93,14 @@ const MDEF = new Map(CATALOG.machines.map((m) => [m.m, m]));
 
 // ── cosmetic maps — colours and labels only ──────────────────────────────────
 const DIRV: Record<Dir, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+const OPP: Record<Dir, Dir> = { N: "S", S: "N", E: "W", W: "E" };
 const ORDER: Dir[] = ["N", "E", "S", "W"];
 const turn = (d: Dir, n = 1): Dir => ORDER[(ORDER.indexOf(d) + n + 4) % 4];
+
+// Connection verdicts, straight from the core's flow graph.
+const FLOW_COLOR: Record<Flow["status"], string> = {
+  ok: "#6fcf5f", open: "#5a6a7d", bad: "#ff5d5d",
+};
 
 const CAT: Record<string, string> = {
   extractor: "#f0a63a", processor: "#e8623c", assembler: "#8b7bf0",
@@ -178,6 +190,48 @@ function arrow(cx: number, cy: number, d: Dir, len: number, col: string) {
   ctx.fill();
 }
 
+/** Midpoint of a tile's edge on side `d`, in canvas coordinates. */
+function edgeMid(x: number, y: number, d: Dir): [number, number] {
+  const [dx, dy] = DIRV[d];
+  return [x * TILE + TILE / 2 + (dx * TILE) / 2, y * TILE + TILE / 2 + (dy * TILE) / 2];
+}
+
+/** Output port: a triangle straddling the tile edge, coloured by the core's
+ *  verdict on the connection. Green flows, grey dangles, red never will. */
+function portOut(x: number, y: number, d: Dir, status: Flow["status"], secondary: boolean) {
+  const [mx, my] = edgeMid(x, y, d);
+  const [dx, dy] = DIRV[d];
+  const px = -dy, py = dx;
+  const s = Math.max(5, TILE * 0.15) * (secondary ? 0.8 : 1);
+  ctx.fillStyle = FLOW_COLOR[status];
+  ctx.beginPath();
+  ctx.moveTo(mx + dx * s, my + dy * s);
+  ctx.lineTo(mx - dx * s * 0.4 + px * s * 0.9, my - dy * s * 0.4 + py * s * 0.9);
+  ctx.lineTo(mx - dx * s * 0.4 - px * s * 0.9, my - dy * s * 0.4 - py * s * 0.9);
+  ctx.closePath();
+  ctx.fill();
+  if (secondary) {
+    ctx.strokeStyle = "#0b0e13";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
+/** Input notch: a dim triangle just inside the edge an item arrives through. */
+function portIn(x: number, y: number, travel: Dir) {
+  const [mx, my] = edgeMid(x, y, OPP[travel]);
+  const [dx, dy] = DIRV[travel];
+  const px = -dy, py = dx;
+  const s = Math.max(4, TILE * 0.11);
+  ctx.fillStyle = "#9fb0c366";
+  ctx.beginPath();
+  ctx.moveTo(mx + dx * s * 1.2, my + dy * s * 1.2);
+  ctx.lineTo(mx + px * s * 0.8, my + py * s * 0.8);
+  ctx.lineTo(mx - px * s * 0.8, my - py * s * 0.8);
+  ctx.closePath();
+  ctx.fill();
+}
+
 function draw() {
   const [W, H] = [G.boardW, G.boardH];
   ctx.clearRect(0, 0, cv.width, cv.height);
@@ -201,21 +255,50 @@ function draw() {
     ctx.setLineDash([]);
   }
 
+  // index the flow graph by source and (for good connections) by target
+  const outFlows = new Map<string, Flow[]>();
+  const inFlows = new Map<string, Flow[]>();
+  for (const f of G.flows) {
+    const fk = `${f.fx},${f.fy}`;
+    if (!outFlows.has(fk)) outFlows.set(fk, []);
+    outFlows.get(fk)!.push(f);
+    if (f.status === "ok") {
+      const tk = `${f.tx},${f.ty}`;
+      if (!inFlows.has(tk)) inFlows.set(tk, []);
+      inFlows.get(tk)!.push(f);
+    }
+  }
+
   // machines
   for (const c of G.board) {
     const col = CAT[c.kind];
     const cx = c.x * TILE + TILE / 2, cy = c.y * TILE + TILE / 2;
+    const k = `${c.x},${c.y}`;
+    const outs = outFlows.get(k) ?? [];
+    const ins = inFlows.get(k) ?? [];
 
     if (c.m === "belt" || c.m === "merger") {
+      // A belt is a path: from every edge that feeds it, through the centre,
+      // out the arrow edge. Corners curve, merges fork — the routing is the
+      // drawing.
+      const out = outs[0];
+      const entries = ins.map((f) => OPP[f.d]);
+      if (!entries.length && out) entries.push(OPP[out.d]);
       ctx.strokeStyle = "#3a4655";
       ctx.lineWidth = Math.max(6, TILE * 0.17);
       ctx.lineCap = "round";
-      const [ox, oy] = DIRV[c.d!];
-      ctx.beginPath();
-      ctx.moveTo(cx - ox * (TILE / 2 - 3), cy - oy * (TILE / 2 - 3));
-      ctx.lineTo(cx + ox * (TILE / 2 - 3), cy + oy * (TILE / 2 - 3));
-      ctx.stroke();
-      arrow(cx, cy, c.d!, TILE / 2 - 9, "#8ea1b8");
+      for (const e of entries) {
+        const [ex, ey] = edgeMid(c.x, c.y, e);
+        const [ox, oy] = out ? edgeMid(c.x, c.y, out.d) : [cx, cy];
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.quadraticCurveTo(cx, cy, ox, oy);
+        ctx.stroke();
+      }
+      if (out) {
+        arrow(cx, cy, out.d, TILE / 2 - 9, out.status === "bad" ? FLOW_COLOR.bad : "#8ea1b8");
+        if (out.status !== "ok") portOut(c.x, c.y, out.d, out.status, false);
+      }
       if (c.m === "merger") {
         ctx.fillStyle = "#8ea1b8";
         ctx.font = `700 ${Math.max(7, TILE * 0.18)}px ui-monospace,monospace`;
@@ -240,14 +323,16 @@ function draw() {
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(SHORT[c.m] ?? "", cx, cy);
 
-      if (c.d && c.kind !== "modifier" && c.kind !== "vault") arrow(cx, cy, c.d, TILE / 2 - 4, col);
-      if (c.d2) arrow(cx, cy, c.d2, TILE / 2 - 4, "#ffffff88");
-
       if (c.m === "filter") {
         ctx.fillStyle = "#0b0e13";
         ctx.font = `700 ${Math.max(7, TILE * 0.16)}px ui-monospace,monospace`;
         ctx.fillText("≥" + (c.minQ ?? "?"), cx, cy + TILE * 0.26);
       }
+
+      // ports: where it emits (coloured by the connection's verdict) and
+      // where it's being fed from
+      for (const f of outs) portOut(c.x, c.y, f.d, f.status, f.secondary);
+      for (const f of ins) portIn(c.x, c.y, f.d);
     }
   }
 
@@ -269,19 +354,45 @@ function draw() {
     }
   }
 
-  // ghost of the pending placement under the cursor
-  if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y)) {
-    const kind = ui.tool.kind === "belt" ? "logistics" : G.hand[ui.tool.idx]?.kind;
-    if (kind) {
+  // ghost of the pending placement under the cursor, arrow showing where
+  // its output will point (R rotates before placing)
+  if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y) && !dragging) {
+    const mKey = ui.tool.kind === "belt" ? "belt" : G.hand[ui.tool.idx]?.m;
+    const m = mKey ? MDEF.get(mKey) : undefined;
+    if (m) {
       ctx.globalAlpha = 0.32;
-      ctx.fillStyle = CAT[kind];
+      ctx.fillStyle = CAT[m.kind];
       rr(hover.x * TILE + 4, hover.y * TILE + 4, TILE - 8, TILE - 8, 6);
       ctx.fill();
       ctx.globalAlpha = 1;
       ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 1.5;
       rr(hover.x * TILE + 2, hover.y * TILE + 2, TILE - 4, TILE - 4, 7);
       ctx.stroke();
+      if (m.transport || m.produces || m.recipe) {
+        const hcx = hover.x * TILE + TILE / 2, hcy = hover.y * TILE + TILE / 2;
+        arrow(hcx, hcy, ui.dir, TILE / 2 - 6, "#ffffffaa");
+      }
     }
+  }
+
+  // live preview of the belt run being dragged
+  if (dragging && dragPath.length) {
+    ctx.strokeStyle = "#8ea1b877";
+    ctx.lineWidth = Math.max(5, TILE * 0.14);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    dragPath.forEach((p, i) => {
+      const px = p.x * TILE + TILE / 2, py = p.y * TILE + TILE / 2;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    const last = dragPath[dragPath.length - 1];
+    const prev = dragPath[dragPath.length - 2];
+    const d: Dir = prev
+      ? (last.x > prev.x ? "E" : last.x < prev.x ? "W" : last.y > prev.y ? "S" : "N")
+      : ui.dir;
+    arrow(last.x * TILE + TILE / 2, last.y * TILE + TILE / 2, d, TILE / 2 - 8, "#ffffffaa");
   }
 }
 

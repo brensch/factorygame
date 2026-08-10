@@ -40,6 +40,9 @@ interface Frame {
   tick: number; total: number; payout: number; done: boolean;
   items: { id: number; x: number; y: number; t: string; q: number }[];
   moves: { id: number; fx: number; fy: number }[];
+  /** Items consumed on arrival this tick (machine inputs, vault deliveries):
+   *  they animate their final hop, then vanish. */
+  hops: { id: number; fx: number; fy: number; x: number; y: number; t: string; q: number }[];
 }
 interface CatAura { speed: number; q: number; noJam: boolean; onlyTag: string | null }
 interface CatM {
@@ -910,6 +913,11 @@ function applyFrame(f: Frame) {
     const px = m ? m.fx : old ? old.x : it.x;
     const py = m ? m.fy : old ? old.y : it.y;
     ui.positions.set(it.id, { x: it.x, y: it.y, px, py, t: it.t, q: it.q });
+  }
+  // consumed items still animate their last hop — into the machine or vault —
+  // and are gone from the next frame
+  for (const h of f.hops) {
+    ui.positions.set(h.id, { x: h.x, y: h.y, px: h.fx, py: h.fy, t: h.t, q: h.q });
   }
   ui.tick = f.tick;
   ui.payout = f.payout;

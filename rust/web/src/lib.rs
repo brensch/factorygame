@@ -696,9 +696,11 @@ fn frame_json(sim: &Sim, total: u32) -> String {
         sim.tick >= total
     );
     let mut first = true;
+    let mut visible: Vec<u64> = Vec::new();
     for y in 0..sim.h {
         for x in 0..sim.w {
             let Some(item) = sim.peek(x, y) else { continue };
+            visible.push(item.id);
             if !first {
                 s.push(',');
             }
@@ -725,6 +727,29 @@ fn frame_json(sim: &Sim, total: u32) -> String {
             m.id,
             m.from as i32 % sim.w,
             m.from as i32 / sim.w
+        );
+    }
+    // Hops: moves whose item was consumed on arrival (machine input, vault
+    // delivery) and so appears in no out slot. Without these, the last leg of
+    // every journey — and the whole journey for machine→machine transfers —
+    // would never be seen.
+    s.push_str("],\"hops\":[");
+    first = true;
+    for m in sim.moves.iter().filter(|m| !visible.contains(&m.id)) {
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        let _ = write!(
+            s,
+            "{{\"id\":{},\"fx\":{},\"fy\":{},\"x\":{},\"y\":{},\"t\":\"{}\",\"q\":{}}}",
+            m.id,
+            m.from as i32 % sim.w,
+            m.from as i32 / sim.w,
+            m.to as i32 % sim.w,
+            m.to as i32 / sim.w,
+            item_key(m.item.ty),
+            m.item.quality
         );
     }
     s.push_str("]}");

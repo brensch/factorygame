@@ -65,11 +65,14 @@ struct Tile {
 }
 
 /// One item hop, emitted per tick so a renderer can interpolate motion.
+/// Carries a snapshot of the item so hops into machine inputs or the vault —
+/// where the item stops being visible board state — can still be animated.
 #[derive(Clone, Copy, Debug)]
 pub struct Move {
     pub id: u64,
     pub from: usize,
     pub to: usize,
+    pub item: Item,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -346,7 +349,7 @@ impl Sim {
 
     fn commit_move(&mut self, i: usize, j: usize) {
         let item = self.tiles[i].out.take().unwrap();
-        self.moves.push(Move { id: item.id, from: i, to: j });
+        self.moves.push(Move { id: item.id, from: i, to: j, item });
         if self.tiles[i].def.unwrap().id == MachineId::Splitter {
             self.tiles[i].rr += 1;
         }
@@ -489,7 +492,7 @@ impl Sim {
             for (k, &i) in comp.iter().enumerate() {
                 let item = snapshot[k].unwrap();
                 let j = edge[i] as usize;
-                self.moves.push(Move { id: item.id, from: i, to: j });
+                self.moves.push(Move { id: item.id, from: i, to: j, item });
                 if self.tiles[i].def.unwrap().id == MachineId::Splitter {
                     self.tiles[i].rr += 1;
                 }

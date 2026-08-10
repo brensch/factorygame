@@ -64,18 +64,22 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   const p = read(core.project());
   expect(p.payout).toBeGreaterThanOrEqual(20);
 
-  // Animate the shift to completion; items must appear along the way.
+  // Animate the shift to completion; items must appear along the way, and
+  // deliveries must animate their final hop into the vault.
   read(core.shift_start());
   let sawItems = false;
+  let sawVaultHop = false;
   let frame: any;
   for (let i = 0; i < 60; i++) {
     frame = read(core.shift_step());
     if (frame.items.length > 0) sawItems = true;
+    if (frame.hops.some((h: any) => h.x === 9 && h.y === 3)) sawVaultHop = true;
     if (frame.done) break;
   }
   expect(frame.done).toBe(true);
   expect(frame.tick).toBe(60);
   expect(sawItems).toBe(true);
+  expect(sawVaultHop).toBe(true);
 
   s = read(core.shift_finish());
   expect(s.phase).toBe("reward");

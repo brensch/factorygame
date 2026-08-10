@@ -134,6 +134,28 @@ fn refused_commands_report_err_and_change_nothing() {
 }
 
 #[test]
+fn consumed_items_still_animate_their_final_hop() {
+    call(boot(42));
+    // Drill butted directly against the furnace: the ore's only journey is
+    // drill→furnace, invisible in out slots — it must appear as a hop.
+    let drill = hand(&out_string()).iter().position(|m| m == "drill").unwrap();
+    call(play(drill as u32, 0, 3, E, -1, -1));
+    let furnace = hand(&out_string()).iter().position(|m| m == "furnace").unwrap();
+    call(play(furnace as u32, 1, 3, E, -1, -1));
+
+    call(shift_start());
+    let mut saw_ore_hop = false;
+    for _ in 0..20 {
+        let f = call(shift_step());
+        if f.contains("\"hops\":[{") && f.contains("\"fx\":0,\"fy\":3,\"x\":1,\"y\":3,\"t\":\"ore\"") {
+            saw_ore_hop = true;
+            break;
+        }
+    }
+    assert!(saw_ore_hop, "direct machine→machine transfer never surfaced as a hop");
+}
+
+#[test]
 fn group_move_over_the_wire_is_atomic() {
     call(boot(42));
     let drill = hand(&out_string()).iter().position(|m| m == "drill").unwrap();

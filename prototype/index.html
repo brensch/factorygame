@@ -75,6 +75,15 @@
 
   .deckinfo{float:right;color:var(--ink-muted);letter-spacing:.04em;text-transform:none;font-weight:400}
 
+  #info h2{font-size:13px;letter-spacing:0;text-transform:none;color:var(--ink);font-family:var(--sans)}
+  .iblurb{font-size:12px;color:var(--ink-muted);line-height:1.5;margin:0 0 9px}
+  .irow{font-size:12.5px;color:var(--ink-2);padding:2.5px 0;line-height:1.5}
+  .irow b{color:var(--ink)}
+  .ichip{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:var(--ink)}
+  .ichip i{width:8px;height:8px;border-radius:3px;display:inline-block;border:1px solid #0b0e13}
+  .itags{font:600 10.5px/1 var(--mono);letter-spacing:.09em;color:var(--modifier)}
+  .off .bl{font-size:10.5px;color:var(--ink-muted);line-height:1.4;margin-top:6px;text-align:left}
+
   #toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;
          background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
          color:var(--ink-2);font-size:13px;padding:9px 14px;pointer-events:none;
@@ -123,6 +132,11 @@
     <div class="sec">
       <h2>Hand <span id="deckInfo" class="deckinfo"></span></h2>
       <div class="pal" id="pal"></div>
+    </div>
+
+    <div class="sec" id="info">
+      <h2 id="infoTitle">—</h2>
+      <div id="infoBody"></div>
     </div>
 
     <div class="sec" id="insp">

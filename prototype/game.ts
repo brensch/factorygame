@@ -26,6 +26,7 @@ interface State {
   qualityCap: number; boardW: number; boardH: number;
   board: Pl[]; hand: Card[]; offers: Card[];
   deckDraw: number; deckDiscard: number;
+  nextQuota: number | null; nextAudit: boolean;
   auras: { x: number; y: number }[];
   last: Outcome | null; err: string | null;
 }
@@ -33,6 +34,17 @@ interface Frame {
   tick: number; total: number; payout: number; done: boolean;
   items: { id: number; x: number; y: number; t: string; q: number }[];
   moves: { id: number; fx: number; fy: number }[];
+}
+interface CatAura { speed: number; q: number; noJam: boolean; onlyTag: string | null }
+interface CatM {
+  m: string; name: string; kind: string; cost: number; tags: string[];
+  produces: string | null; period: number; spawnQ: number;
+  recipe: { inputs: string[]; output: string; ticks: number } | null;
+  transport: boolean; qualityBonus: number; aura: CatAura | null; blurb: string;
+}
+interface Catalog {
+  qualityStep: number; qualityCap: number; dupChance: number;
+  items: Record<string, number>; machines: CatM[];
 }
 
 // ── wasm boot ────────────────────────────────────────────────────────────────
@@ -42,6 +54,7 @@ const wasm = await WebAssembly.instantiate(
 const core = wasm.instance.exports as {
   memory: WebAssembly.Memory;
   out_ptr(): number;
+  catalog(): number;
   boot(seed: number): number;
   state(): number;
   belt(x: number, y: number, d: number): number;
@@ -66,6 +79,11 @@ function read<T>(len: number): T {
 
 const DCODE: Record<Dir, number> = { N: 0, E: 1, S: 2, W: 3 };
 const dc = (d: Dir | null) => (d === null ? -1 : DCODE[d]);
+
+// The machine catalogue: every definition the game runs on, exported by the
+// core so the UI can explain cards without owning any rules.
+const CATALOG = read<Catalog>(core.catalog());
+const MDEF = new Map(CATALOG.machines.map((m) => [m.m, m]));
 
 // ── cosmetic maps — colours and labels only ──────────────────────────────────
 const DIRV: Record<Dir, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
@@ -313,6 +331,114 @@ function paintHand() {
     `deck ${G.deckDraw} · discard ${G.deckDiscard}`;
 }
 
+// ── the info panel: what a machine does, fed by the core's catalogue ─────────
+const capName = (k: string) => k.charAt(0).toUpperCase() + k.slice(1);
+const chip = (item: string, n = 1) =>
+  `<span class="ichip"><i style="background:${ITEM_COLOR[item] ?? "#fff"}"></i>${n > 1 ? `${n}× ` : ""}${capName(item)}</span>`;
+
+function grouped(inputs: string[]): [string, number][] {
+  const counts = new Map<string, number>();
+  for (const i of inputs) counts.set(i, (counts.get(i) ?? 0) + 1);
+  return [...counts.entries()];
+}
+
+const producersOf = (item: string) =>
+  CATALOG.machines.filter((m) => m.produces === item || m.recipe?.output === item);
+const consumersOf = (item: string) =>
+  CATALOG.machines.filter((m) => m.recipe?.inputs.includes(item));
+
+function auraText(a: CatAura): string {
+  const effects: string[] = [];
+  if (a.speed !== 1) effects.push(`${Math.round((a.speed - 1) * 100)}% faster`);
+  if (a.q) effects.push(`+${a.q} output quality`);
+  if (a.noJam) effects.push("never jams");
+  const target = a.onlyTag ? `adjacent ${a.onlyTag.toUpperCase()} machines` : "all adjacent machines";
+  return `<b>Aura</b> — ${target}: ${effects.join(", ")}`;
+}
+
+/** One compact line of mechanics, for offer cards and the hand. */
+function mechShort(key: string): string {
+  const m = MDEF.get(key);
+  if (!m) return "";
+  if (m.recipe)
+    return `${grouped(m.recipe.inputs).map(([i, n]) => (n > 1 ? `${n}×${capName(i)}` : capName(i))).join(" + ")} → ${capName(m.recipe.output)}`;
+  if (m.produces) return `makes ${capName(m.produces)}`;
+  if (m.aura) {
+    const fx = m.aura.speed !== 1 ? `+${Math.round((m.aura.speed - 1) * 100)}% speed`
+      : `+${m.aura.q} quality${m.aura.noJam ? ", no jams" : ""}`;
+    return `${fx} aura${m.aura.onlyTag ? ` (${m.aura.onlyTag.toUpperCase()})` : ""}`;
+  }
+  if (m.qualityBonus) return `+${m.qualityBonus} quality pass-through`;
+  switch (key) {
+    case "filter": return "quality gate valve";
+    case "splitter": return "splits a lane in two";
+    case "merger": return "joins lanes into one";
+    case "dup": return `${Math.round(CATALOG.dupChance * 100)}% chance to clone`;
+    case "buffer": return "belt (for now)";
+    default: return m.kind;
+  }
+}
+
+function infoHTML(key: string): string {
+  const m = MDEF.get(key);
+  if (!m) return "";
+  const rows: string[] = [];
+
+  if (m.produces) {
+    rows.push(`Makes ${chip(m.produces)} every ${m.period} ticks` +
+      (m.spawnQ ? ` · starts at quality ${m.spawnQ}` : ""));
+  }
+  if (m.recipe) {
+    rows.push(`${grouped(m.recipe.inputs).map(([i, n]) => chip(i, n)).join(" + ")} → ${chip(m.recipe.output)} · ${m.recipe.ticks} ticks`);
+  }
+  if (m.qualityBonus) rows.push(`<b>+${m.qualityBonus} quality</b> to every item passing through`);
+  if (m.aura) rows.push(auraText(m.aura));
+
+  // the chain around it: where its inputs come from, where its output goes
+  if (m.recipe) {
+    for (const [i] of grouped(m.recipe.inputs)) {
+      const from = producersOf(i).map((p) => p.name);
+      if (from.length) rows.push(`${chip(i)} comes from ${from.join(", ")}`);
+    }
+  }
+  const out = m.produces ?? m.recipe?.output;
+  if (out) {
+    const base = CATALOG.items[out];
+    const eaters = consumersOf(out).map((c) => c.name);
+    rows.push(`${chip(out)} is worth <b>${base}c</b> +${Math.round(CATALOG.qualityStep * 100)}%/quality at the Vault` +
+      (eaters.length ? ` · feeds ${eaters.join(", ")}` : ""));
+  }
+
+  // synergies via tags
+  if (m.tags.length) {
+    const boosters = CATALOG.machines
+      .filter((b) => b.aura?.onlyTag && m.tags.includes(b.aura.onlyTag) && b.m !== key)
+      .map((b) => b.name);
+    rows.push(`<span class="itags">${m.tags.map((t) => t.toUpperCase()).join(" · ")}</span>` +
+      (boosters.length ? ` — boosted by ${boosters.join(", ")}` : ""));
+  }
+  if (m.aura?.onlyTag) {
+    const targets = CATALOG.machines
+      .filter((t) => t.tags.includes(m.aura!.onlyTag!) && (t.produces || t.recipe))
+      .map((t) => t.name);
+    if (targets.length) rows.push(`Boosts: ${targets.join(", ")}`);
+  }
+
+  return `<p class="iblurb">${m.blurb}</p>` + rows.map((r) => `<div class="irow">${r}</div>`).join("");
+}
+
+function paintInfo() {
+  const title = document.getElementById("infoTitle")!;
+  const body = document.getElementById("infoBody")!;
+  // Priority: a selected placed machine, else the card in hand, else the belt.
+  let key = "belt";
+  if (ui.selected) key = at(ui.selected.x, ui.selected.y)?.m ?? "belt";
+  else if (ui.tool.kind === "card") key = G.hand[ui.tool.idx]?.m ?? "belt";
+  const m = MDEF.get(key);
+  title.innerHTML = m ? `${m.name} <span class="deckinfo">${m.cost}c · ${m.kind}</span>` : "—";
+  body.innerHTML = infoHTML(key);
+}
+
 function paintInspector() {
   const box = document.getElementById("insp")!;
   const body = document.getElementById("inspBody")!;
@@ -365,6 +491,7 @@ function paintHeader() {
 
 function paintAll() {
   paintHand();
+  paintInfo();
   paintInspector();
   paintHeader();
   if (G.phase === "build" && !ui.animating) project();
@@ -559,15 +686,16 @@ function offerRewards() {
         ${o.quota.toLocaleString()}. Surplus of ${surplus.toLocaleString()} banked —
         you now have <b>${G.credits}</b> credits.
         ${o.inFlight} items were still on belts and were forfeit.</p>
-     <p style="margin-bottom:10px"><b>Round ${G.round + 1}</b> needs
-        <b style="color:var(--extractor)">${G.quota.toLocaleString()}</b>${G.audit
+     <p style="margin-bottom:10px"><b>Round ${G.round + 2}</b> needs
+        <b style="color:var(--extractor)">${(G.nextQuota ?? 0).toLocaleString()}</b>${G.nextAudit
           ? ` — and it's an <b style="color:var(--processor)">AUDIT</b>.`
           : "."} Add one blueprint card to your deck:</p>
      <div class="offers">${G.offers.map((c, i) =>
        `<div class="off" data-i="${i}">
          <div class="sw" style="background:${CAT[c.kind]}">${SHORT[c.m] || "▸"}</div>
          <div class="nm">${c.name}</div>
-         <div class="ds">${c.cost}c · ${c.kind}</div></div>`).join("")}</div>
+         <div class="ds">${c.cost}c · ${mechShort(c.m)}</div>
+         <div class="bl">${MDEF.get(c.m)?.blurb ?? ""}</div></div>`).join("")}</div>
      <button data-i="-1" style="width:100%">Skip — keep the deck lean</button>`,
   );
   document.querySelectorAll<HTMLElement>("[data-i]").forEach((el) => {

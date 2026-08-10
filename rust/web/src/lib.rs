@@ -13,9 +13,12 @@
 //! The JS layer holds NO game rules — it renders state and forwards input.
 //! That invariant carried the first prototype and it carries this one.
 
-use overflow_core::defs::{def, Dir, ItemType, Kind, MachineId, QUALITY_CAP};
+use overflow_core::defs::{
+    def, Dir, ItemType, Kind, MachineId, Tag, CARD_POOL, DUP_CLONE_CHANCE, QUALITY_CAP,
+    QUALITY_STEP,
+};
 use overflow_core::deck::Card;
-use overflow_core::run::{is_audit, shift_len, Game, GamePhase, BOARD_H, BOARD_W};
+use overflow_core::run::{is_audit, shift_len, Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
 use overflow_core::sim::{FilterCfg, Placement, Sim};
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -153,6 +156,18 @@ pub extern "C" fn shift_finish() -> usize {
     })
 }
 
+/// The machine catalogue: every definition the game runs on, as data, so the
+/// UI can explain a card — recipe, aura, tags, item values — without a single
+/// rule living in JavaScript. Static; fetch once at boot.
+#[no_mangle]
+pub extern "C" fn catalog() -> usize {
+    let doc = catalog_json();
+    OUT.with(|o| {
+        *o.borrow_mut() = doc;
+        o.borrow().len()
+    })
+}
+
 /// Host-side test access to the same buffer JS reads.
 pub fn out_string() -> String {
     OUT.with(|o| o.borrow().clone())
@@ -246,6 +261,151 @@ fn item_key(t: ItemType) -> &'static str {
     }
 }
 
+fn tag_key(t: Tag) -> &'static str {
+    match t {
+        Tag::Heat => "heat",
+        Tag::Kinetic => "kinetic",
+        Tag::Volt => "volt",
+        Tag::Precision => "precision",
+        Tag::Organic => "organic",
+    }
+}
+
+/// One or two sentences of behaviour per machine. Mechanics numbers in the
+/// catalogue come from `defs.rs`; these cover the behaviours that live in the
+/// sim's code paths (gates, round-robin, cloning) in plain words.
+fn blurb(m: MachineId) -> String {
+    use MachineId as M;
+    match m {
+        M::Drill => "Pulls Ore out of the ground on a fixed cycle. The start of every metal chain.".into(),
+        M::Tap => "Slow, but its Sap starts at quality 1 — the only extractor with a head start.".into(),
+        M::Geode => "Cracks out Crystal, slowly. The way into the Precision chain.".into(),
+        M::Furnace => "Smelts one Ore into one Ingot — a 4× value jump per item.".into(),
+        M::Retort => "Cooks Sap into Resin.".into(),
+        M::Lapidary => "Cuts Crystal into Shards.".into(),
+        M::Compress => "Crushes FOUR Ore into one Ingot. Trades throughput for belt space — feed it well or it starves.".into(),
+        M::Fab => "Two Ingots become one Gear — another 4× jump. Usually the first bottleneck worth boosting.".into(),
+        M::CircuitBench => "Ingot + Shard → Circuit. Marries the metal and precision chains.".into(),
+        M::LensGrinder => "Shard + Resin → Lens. Marries the precision and organic chains.".into(),
+        M::EngineWorks => "Gear + Circuit → Engine. Top of the chain, 64 base value.".into(),
+        M::Belt => "Moves one item per tick in its arrow direction. 1 credit, always available, never a card.".into(),
+        M::Merger => "A belt that accepts from every side and sends everything out one edge. Joins lanes.".into(),
+        M::Splitter => "Alternates items between its two output edges, one-for-one. Splits a lane fairly.".into(),
+        M::Buffer => "Currently behaves as a plain belt — its hold-and-release policy is an open design question (NOTES.md).".into(),
+        M::Filter => "Passes items straight through until one meets its quality gate, then ejects it out the side edge. The exit valve that makes polish loops pay.".into(),
+        M::Overclock => "Aura: adjacent machines work faster. Park it next to your bottleneck.".into(),
+        M::Polisher => "Every item passing through gains +1 quality. In a closed belt loop, items lap it and climb toward the cap.".into(),
+        M::Heatsink => "Aura: adjacent HEAT machines gain +1 output quality and never jam. Does nothing for anything else.".into(),
+        M::Dup => format!(
+            "Items passing through have a {:.0}% chance to be cloned; the clone follows once the path ahead clears. In a loop, this is the exponential — and the brick.",
+            DUP_CLONE_CHANCE * 100.0
+        ),
+        M::Vault => "Deliver here. Pays base value × (1 + 0.25 × quality). Items still on belts at the horn are forfeit.".into(),
+    }
+}
+
+fn push_machine_def(s: &mut String, m: MachineId) {
+    let d = def(m);
+    let _ = write!(
+        s,
+        "{{\"m\":\"{}\",\"name\":\"{}\",\"kind\":\"{}\",\"cost\":{},\"tags\":[",
+        machine_key(m),
+        d.name,
+        kind_key(d.kind),
+        d.cost
+    );
+    for (i, t) in d.tags.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(s, "\"{}\"", tag_key(*t));
+    }
+    s.push_str("],");
+    match d.produces {
+        Some(p) => {
+            let _ = write!(
+                s,
+                "\"produces\":\"{}\",\"period\":{},\"spawnQ\":{},",
+                item_key(p),
+                d.period,
+                d.spawn_quality
+            );
+        }
+        None => s.push_str("\"produces\":null,\"period\":0,\"spawnQ\":0,"),
+    }
+    match &d.recipe {
+        Some(r) => {
+            s.push_str("\"recipe\":{\"inputs\":[");
+            for (i, inp) in r.inputs.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                let _ = write!(s, "\"{}\"", item_key(*inp));
+            }
+            let _ = write!(s, "],\"output\":\"{}\",\"ticks\":{}}},", item_key(r.output), r.ticks);
+        }
+        None => s.push_str("\"recipe\":null,"),
+    }
+    let _ = write!(
+        s,
+        "\"transport\":{},\"qualityBonus\":{},",
+        d.transport, d.quality_bonus
+    );
+    match &d.aura {
+        Some(a) => {
+            let _ = write!(
+                s,
+                "\"aura\":{{\"speed\":{},\"q\":{},\"noJam\":{},\"onlyTag\":",
+                a.speed, a.quality_out, a.no_jam
+            );
+            match a.only_tag {
+                Some(t) => {
+                    let _ = write!(s, "\"{}\"}},", tag_key(t));
+                }
+                None => s.push_str("null},"),
+            }
+        }
+        None => s.push_str("\"aura\":null,"),
+    }
+    s.push_str("\"blurb\":\"");
+    push_escaped(s, &blurb(m));
+    s.push_str("\"}");
+}
+
+fn catalog_json() -> String {
+    const ITEMS: [ItemType; 12] = [
+        ItemType::Ore, ItemType::Sap, ItemType::Crystal,
+        ItemType::Ingot, ItemType::Resin, ItemType::Shard,
+        ItemType::Gear, ItemType::Circuit, ItemType::Lens,
+        ItemType::Engine, ItemType::Core, ItemType::Beacon,
+    ];
+    let mut s = String::with_capacity(8192);
+    let _ = write!(
+        s,
+        "{{\"qualityStep\":{QUALITY_STEP},\"qualityCap\":{QUALITY_CAP},\"dupChance\":{DUP_CLONE_CHANCE},\"items\":{{"
+    );
+    for (i, it) in ITEMS.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(s, "\"{}\":{}", item_key(*it), it.base_value());
+    }
+    s.push_str("},\"machines\":[");
+    for (i, m) in CARD_POOL
+        .iter()
+        .copied()
+        .chain([MachineId::Belt, MachineId::Vault])
+        .enumerate()
+    {
+        if i > 0 {
+            s.push(',');
+        }
+        push_machine_def(&mut s, m);
+    }
+    s.push_str("]}");
+    s
+}
+
 fn dir_key(d: Dir) -> &'static str {
     match d {
         Dir::N => "N",
@@ -335,6 +495,21 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         BOARD_W,
         BOARD_H,
     );
+
+    // During the reward phase the modal advertises the round about to start,
+    // which the game hasn't advanced to yet.
+    match g.phase {
+        GamePhase::Reward if g.round + 1 < QUOTAS.len() => {
+            let next = g.round + 1;
+            let _ = write!(
+                s,
+                "\"nextQuota\":{},\"nextAudit\":{},",
+                QUOTAS[next],
+                is_audit(next)
+            );
+        }
+        _ => s.push_str("\"nextQuota\":null,\"nextAudit\":false,"),
+    }
 
     s.push_str("\"board\":[");
     for (i, p) in g.board.iter().enumerate() {

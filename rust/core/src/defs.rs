@@ -28,6 +28,9 @@ impl ItemType {
 pub const QUALITY_STEP: f64 = 0.25;
 pub const QUALITY_CAP: i32 = 10; // raised to 20 by the Overengineered relic
 
+/// Chance per pass-through that a Duplicator queues a clone.
+pub const DUP_CLONE_CHANCE: f64 = 0.15;
+
 pub fn item_value(t: ItemType, quality: i32) -> f64 {
     t.base_value() * (1.0 + QUALITY_STEP * quality as f64)
 }

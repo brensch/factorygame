@@ -6,7 +6,9 @@
 //!   - Deterministic. Same board + same seed => same result, every time.
 //!   - Order-independent. Tile iteration order never affects the outcome.
 
-use crate::defs::{def, item_value, Dir, ItemType, Kind, MachineDef, MachineId, QUALITY_CAP};
+use crate::defs::{
+    def, item_value, Dir, ItemType, Kind, MachineDef, MachineId, DUP_CLONE_CHANCE, QUALITY_CAP,
+};
 use crate::rng::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -269,7 +271,7 @@ impl Sim {
                 // Duplicator: a clone queues behind the original, released as
                 // soon as the output slot frees. Inside a loop, this is the
                 // exponential.
-                if d.id == MachineId::Dup && self.rng.next_f64() < 0.15 {
+                if d.id == MachineId::Dup && self.rng.next_f64() < DUP_CLONE_CHANCE {
                     let clone = self.mk(placed.ty, placed.quality);
                     self.tiles[i].inputs.push(clone);
                 }

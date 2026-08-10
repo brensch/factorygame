@@ -109,6 +109,7 @@ fn a_whole_round_through_the_wire_format() {
     assert_eq!(field(&s, "phase"), "reward");
     let cleared_payout = num(&s, "payout");
     assert!(cleared_payout >= 20);
+    assert_eq!(num(&s, "nextQuota"), 45, "reward modal advertises the NEXT round: {s}");
     let offers_at = s.find("\"offers\":[").unwrap();
     let offers = &s[offers_at..offers_at + s[offers_at..].find(']').unwrap()];
     assert_eq!(offers.matches("\"name\":").count(), 3, "three offers: {s}");
@@ -130,6 +131,25 @@ fn refused_commands_report_err_and_change_nothing() {
 
     let s = call(play(9, 0, 0, E, -1, -1));
     assert!(s.contains("no such card"), "{s}");
+}
+
+#[test]
+fn catalog_carries_recipes_auras_and_values() {
+    let s = call(catalog());
+    // recipe data straight from defs.rs
+    assert!(s.contains("\"m\":\"fab\""), "{s}");
+    assert!(
+        s.contains("\"recipe\":{\"inputs\":[\"ingot\",\"ingot\"],\"output\":\"gear\",\"ticks\":5}"),
+        "fab recipe: {s}"
+    );
+    // aura data, including the tag restriction
+    assert!(s.contains("\"onlyTag\":\"heat\""), "heatsink aura tag: {s}");
+    // item base values
+    assert!(s.contains("\"gear\":16"), "{s}");
+    // behaviour blurbs quote the real balance constant
+    assert!(s.contains("15% chance"), "dup blurb uses DUP_CLONE_CHANCE: {s}");
+    // every card machine plus belt and vault is described
+    assert_eq!(s.matches("\"blurb\":").count(), 21, "{s}");
 }
 
 #[test]

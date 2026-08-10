@@ -28,6 +28,8 @@ struct App {
     /// The live, tick-by-tick sim during the shift animation. Same seed as
     /// the commit in `shift_finish`, so what you watch is what you get.
     shift: Option<Sim>,
+    /// Tiles staged for a group move (`sel_add` … `sel_move`).
+    sel: Vec<(i32, i32)>,
 }
 
 thread_local! {
@@ -40,7 +42,9 @@ thread_local! {
 /// Start (or restart) a run. Returns state.
 #[no_mangle]
 pub extern "C" fn boot(seed: u32) -> usize {
-    APP.with(|a| *a.borrow_mut() = Some(App { game: Game::new(seed), shift: None }));
+    APP.with(|a| {
+        *a.borrow_mut() = Some(App { game: Game::new(seed), shift: None, sel: Vec::new() })
+    });
     state()
 }
 
@@ -97,6 +101,37 @@ pub extern "C" fn rotate2(x: i32, y: i32) -> usize {
 #[no_mangle]
 pub extern "C" fn set_gate(x: i32, y: i32, q: i32) -> usize {
     command(|g| g.set_filter_gate(x, y, q))
+}
+
+/// Empty the staged move selection.
+#[no_mangle]
+pub extern "C" fn sel_clear() -> usize {
+    with_app(|app| {
+        app.sel.clear();
+        state_json(&app.game, None)
+    })
+}
+
+/// Stage a tile for the next `sel_move`.
+#[no_mangle]
+pub extern "C" fn sel_add(x: i32, y: i32) -> usize {
+    with_app(|app| {
+        if !app.sel.contains(&(x, y)) {
+            app.sel.push((x, y));
+        }
+        state_json(&app.game, None)
+    })
+}
+
+/// Move everything staged by (dx, dy) as one rigid piece — all or nothing.
+/// The selection is consumed either way.
+#[no_mangle]
+pub extern "C" fn sel_move(dx: i32, dy: i32) -> usize {
+    with_app(|app| {
+        let tiles = std::mem::take(&mut app.sel);
+        let err = app.game.move_by(&tiles, dx, dy).err();
+        state_json(&app.game, err.as_deref())
+    })
 }
 
 /// Take the reward at `offer_idx`, or skip with -1.

@@ -134,6 +134,32 @@ fn refused_commands_report_err_and_change_nothing() {
 }
 
 #[test]
+fn group_move_over_the_wire_is_atomic() {
+    call(boot(42));
+    let drill = hand(&out_string()).iter().position(|m| m == "drill").unwrap();
+    call(play(drill as u32, 0, 3, E, -1, -1));
+    call(belt(1, 3, E));
+
+    // Stage both and slide them one tile south.
+    call(sel_add(0, 3));
+    call(sel_add(1, 3));
+    let s = call(sel_move(0, 1));
+    assert_eq!(field(&s, "err"), "null");
+    assert!(s.contains("\"x\":0,\"y\":4,\"m\":\"drill\""), "{s}");
+    assert!(s.contains("\"x\":1,\"y\":4,\"m\":\"belt\""), "{s}");
+
+    // A refused move consumes the selection but changes no positions.
+    call(sel_add(0, 4));
+    let s = call(sel_move(-1, 0));
+    assert_ne!(field(&s, "err"), "null");
+    assert!(s.contains("\"x\":0,\"y\":4,\"m\":\"drill\""), "{s}");
+
+    // The selection was consumed: a bare sel_move has nothing to act on.
+    let s = call(sel_move(1, 0));
+    assert!(s.contains("nothing movable"), "{s}");
+}
+
+#[test]
 fn flows_report_ok_open_and_bad_connections() {
     call(boot(42));
     let drill = hand(&out_string()).iter().position(|m| m == "drill").unwrap();

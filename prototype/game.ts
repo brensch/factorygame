@@ -61,6 +61,9 @@ const core = wasm.instance.exports as {
   memory: WebAssembly.Memory;
   out_ptr(): number;
   catalog(): number;
+  sel_clear(): number;
+  sel_add(x: number, y: number): number;
+  sel_move(dx: number, dy: number): number;
   boot(seed: number): number;
   state(): number;
   belt(x: number, y: number, d: number): number;
@@ -128,6 +131,8 @@ const ui = {
   tool: { kind: "belt" } as Tool,
   dir: "E" as Dir,
   selected: null as { x: number; y: number } | null,
+  /** Tiles in the group selection, as "x,y" keys. Moves as one piece. */
+  multiSel: new Set<string>(),
   animating: false,
   speed: 1,
   positions: new Map<number, { x: number; y: number; px: number; py: number; t: string; q: number }>(),
@@ -336,6 +341,19 @@ function draw() {
     }
   }
 
+  // group selection: dashed outline on every selected tile
+  if (ui.multiSel.size) {
+    ctx.strokeStyle = "#7fd8ff";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    for (const k of ui.multiSel) {
+      const [x, y] = k.split(",").map(Number);
+      rr(x * TILE + 2, y * TILE + 2, TILE - 4, TILE - 4, 7);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
   // items in flight
   for (const p of ui.positions.values()) {
     const x = p.px + (p.x - p.px) * ui.alpha;
@@ -356,7 +374,7 @@ function draw() {
 
   // ghost of the pending placement under the cursor, arrow showing where
   // its output will point (R rotates before placing)
-  if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y) && !dragging) {
+  if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y) && !drag) {
     const mKey = ui.tool.kind === "belt" ? "belt" : G.hand[ui.tool.idx]?.m;
     const m = mKey ? MDEF.get(mKey) : undefined;
     if (m) {
@@ -376,23 +394,73 @@ function draw() {
   }
 
   // live preview of the belt run being dragged
-  if (dragging && dragPath.length) {
+  if (drag?.mode === "belt" && drag.path.length) {
+    const path = drag.path;
     ctx.strokeStyle = "#8ea1b877";
     ctx.lineWidth = Math.max(5, TILE * 0.14);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.beginPath();
-    dragPath.forEach((p, i) => {
+    path.forEach((p, i) => {
       const px = p.x * TILE + TILE / 2, py = p.y * TILE + TILE / 2;
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     });
     ctx.stroke();
-    const last = dragPath[dragPath.length - 1];
-    const prev = dragPath[dragPath.length - 2];
+    const last = path[path.length - 1];
+    const prev = path[path.length - 2];
     const d: Dir = prev
       ? (last.x > prev.x ? "E" : last.x < prev.x ? "W" : last.y > prev.y ? "S" : "N")
       : ui.dir;
     arrow(last.x * TILE + TILE / 2, last.y * TILE + TILE / 2, d, TILE / 2 - 8, "#ffffffaa");
+  }
+
+  // rubber-band rectangle
+  if (drag?.mode === "band") {
+    const x = Math.min(drag.x0, drag.x1) * TILE + 2;
+    const y = Math.min(drag.y0, drag.y1) * TILE + 2;
+    const w = (Math.abs(drag.x1 - drag.x0) + 1) * TILE - 4;
+    const h = (Math.abs(drag.y1 - drag.y0) + 1) * TILE - 4;
+    ctx.fillStyle = "#7fd8ff18";
+    ctx.strokeStyle = "#7fd8ff";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 3]);
+    rr(x, y, w, h, 7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // the group mid-move: dim the originals, ghost the piece at its target,
+  // tinted by whether it can land there
+  if (drag?.mode === "move" && (drag.dx || drag.dy)) {
+    const ok = moveValid(drag.tiles, drag.dx, drag.dy);
+    ctx.fillStyle = "#0b0e13aa";
+    for (const k of drag.tiles) {
+      const [x, y] = k.split(",").map(Number);
+      rr(x * TILE + 1.5, y * TILE + 1.5, TILE - 3, TILE - 3, 5);
+      ctx.fill();
+    }
+    for (const k of drag.tiles) {
+      const [x, y] = k.split(",").map(Number);
+      const p = at(x, y);
+      if (!p) continue;
+      const gx = x + drag.dx, gy = y + drag.dy;
+      ctx.globalAlpha = 0.55;
+      ctx.fillStyle = p.m === "belt" || p.m === "merger" ? "#3a4655" : CAT[p.kind];
+      rr(gx * TILE + 4, gy * TILE + 4, TILE - 8, TILE - 8, 6);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      if (SHORT[p.m]) {
+        ctx.fillStyle = "#0b0e13";
+        ctx.font = `700 ${Math.max(8, TILE * 0.21)}px ui-monospace,monospace`;
+        ctx.textAlign = "center"; ctx.textBaseline = "middle";
+        ctx.fillText(SHORT[p.m], gx * TILE + TILE / 2, gy * TILE + TILE / 2);
+      }
+      ctx.strokeStyle = ok ? FLOW_COLOR.ok : FLOW_COLOR.bad;
+      ctx.lineWidth = 2;
+      rr(gx * TILE + 2, gy * TILE + 2, TILE - 4, TILE - 4, 7);
+      ctx.stroke();
+    }
   }
 }
 
@@ -616,10 +684,22 @@ function toast(msg: string) {
   setTimeout(() => el.classList.remove("on"), 1800);
 }
 
-// ── input ────────────────────────────────────────────────────────────────────
+// ── input: a small drag state machine ────────────────────────────────────────
+// belt       drag from an empty tile with the Belt tool: lay a run
+// band       Shift+drag anywhere: rubber-band a group selection
+// maybe-move pointer down on a machine: becomes a move once it leaves the tile
+// move       drag the machine (or the whole selection it belongs to)
+type DragState =
+  | { mode: "belt"; path: { x: number; y: number }[] }
+  | { mode: "band"; x0: number; y0: number; x1: number; y1: number }
+  | { mode: "maybe-move"; start: { x: number; y: number } }
+  | { mode: "move"; start: { x: number; y: number }; tiles: Set<string>; dx: number; dy: number }
+  | null;
+
 let hover: { x: number; y: number } | null = null;
-let dragging = false;
-let dragPath: Array<{ x: number; y: number }> = [];
+let drag: DragState = null;
+
+const tk = (x: number, y: number) => `${x},${y}`;
 
 function toTile(ev: MouseEvent | Touch) {
   const r = cv.getBoundingClientRect();
@@ -628,21 +708,54 @@ function toTile(ev: MouseEvent | Touch) {
   return x >= 0 && y >= 0 && x < G.boardW && y < G.boardH ? { x, y } : null;
 }
 
-function commitDrag() {
+function commitBeltRun(path: { x: number; y: number }[]) {
   // Lay a belt run along the dragged path, auto-orienting each tile toward
   // the next. Refusals (occupied tiles, empty wallet) surface as toasts.
-  for (let i = 0; i < dragPath.length; i++) {
-    const a = dragPath[i], b = dragPath[i + 1];
+  for (let i = 0; i < path.length; i++) {
+    const a = path[i], b = path[i + 1];
     let d: Dir = ui.dir;
     if (b) {
       d = b.x > a.x ? "E" : b.x < a.x ? "W" : b.y > a.y ? "S" : "N";
     } else if (i > 0) {
-      const p = dragPath[i - 1];
+      const p = path[i - 1];
       d = a.x > p.x ? "E" : a.x < p.x ? "W" : a.y > p.y ? "S" : "N";
     }
     if (!at(a.x, a.y)) cmd(core.belt(a.x, a.y, DCODE[d]));
   }
-  dragPath = [];
+}
+
+/** Can the current move-drag land? Pure geometry; the core re-validates. */
+function moveValid(tiles: Set<string>, dx: number, dy: number): boolean {
+  for (const k of tiles) {
+    const [x, y] = k.split(",").map(Number);
+    const p = at(x, y);
+    if (!p) continue;
+    const nx = x + dx, ny = y + dy;
+    if (nx < 0 || ny < 0 || nx >= G.boardW || ny >= G.boardH) return false;
+    const occ = at(nx, ny);
+    if (occ && !tiles.has(tk(nx, ny))) return false;
+  }
+  return true;
+}
+
+function commitMove(m: { tiles: Set<string>; dx: number; dy: number }) {
+  if (m.dx === 0 && m.dy === 0) return;
+  core.sel_clear();
+  for (const k of m.tiles) {
+    const [x, y] = k.split(",").map(Number);
+    core.sel_add(x, y);
+  }
+  if (cmd(core.sel_move(m.dx, m.dy))) {
+    // carry the selection along with the piece it selects
+    ui.multiSel = new Set(
+      [...m.tiles]
+        .map((k) => { const [x, y] = k.split(",").map(Number); return tk(x + m.dx, y + m.dy); })
+        .filter((k) => { const [x, y] = k.split(",").map(Number); return !!at(x, y); }),
+    );
+    if (ui.selected && m.tiles.has(tk(ui.selected.x, ui.selected.y))) {
+      ui.selected = { x: ui.selected.x + m.dx, y: ui.selected.y + m.dy };
+    }
+  }
 }
 
 const buildLocked = () => G.phase !== "build" || ui.animating;
@@ -655,26 +768,30 @@ cv.addEventListener("pointerdown", (e) => {
   if (!t) return;
   cv.setPointerCapture(e.pointerId);
 
-  if (e.button === 2) { cmd(core.sell(t.x, t.y)); paintAll(); return; }
-
-  const existing = at(t.x, t.y);
-  if (existing) {
-    if (existing.m === "vault") return;
-    // clicking a placed machine selects it; clicking again rotates it
-    if (ui.selected && ui.selected.x === t.x && ui.selected.y === t.y) {
-      cmd(core.rotate(t.x, t.y));
-    }
-    ui.selected = { x: t.x, y: t.y };
-    const now = at(t.x, t.y);
-    if (now?.d) ui.dir = now.d;
+  if (e.button === 2) {
+    cmd(core.sell(t.x, t.y));
+    ui.multiSel.delete(tk(t.x, t.y));
     paintAll();
     return;
   }
 
+  if (e.shiftKey) {
+    drag = { mode: "band", x0: t.x, y0: t.y, x1: t.x, y1: t.y };
+    draw();
+    return;
+  }
+
+  const existing = at(t.x, t.y);
+  if (existing) {
+    if (existing.m === "vault") return;
+    drag = { mode: "maybe-move", start: t }; // click or move — decided on release
+    return;
+  }
+
   ui.selected = null;
+  ui.multiSel.clear();
   if (ui.tool.kind === "belt") {
-    dragging = true;
-    dragPath = [t];
+    drag = { mode: "belt", path: [t] };
   } else {
     placeAt(t.x, t.y, ui.dir);
   }
@@ -684,21 +801,71 @@ cv.addEventListener("pointerdown", (e) => {
 cv.addEventListener("pointermove", (e) => {
   const t = toTile(e);
   hover = t;
-  if (dragging && t) {
-    const last = dragPath[dragPath.length - 1];
-    if (!last || last.x !== t.x || last.y !== t.y) {
+  if (drag && t) {
+    if (drag.mode === "belt") {
+      const last = drag.path[drag.path.length - 1];
       // only extend along orthogonal steps, so diagonal flicks don't skip tiles
-      if (last && Math.abs(t.x - last.x) + Math.abs(t.y - last.y) === 1) dragPath.push(t);
+      if (last && Math.abs(t.x - last.x) + Math.abs(t.y - last.y) === 1 &&
+          (last.x !== t.x || last.y !== t.y)) {
+        drag.path.push(t);
+      }
+    } else if (drag.mode === "band") {
+      drag.x1 = t.x; drag.y1 = t.y;
+    } else if (drag.mode === "maybe-move") {
+      if (t.x !== drag.start.x || t.y !== drag.start.y) {
+        const startKey = tk(drag.start.x, drag.start.y);
+        const tiles = ui.multiSel.has(startKey) ? new Set(ui.multiSel) : new Set([startKey]);
+        ui.multiSel = new Set(tiles);
+        drag = { mode: "move", start: drag.start, tiles, dx: t.x - drag.start.x, dy: t.y - drag.start.y };
+      }
+    } else if (drag.mode === "move") {
+      drag.dx = t.x - drag.start.x;
+      drag.dy = t.y - drag.start.y;
     }
   }
   draw();
 });
 
 cv.addEventListener("pointerup", () => {
-  if (dragging) { commitDrag(); dragging = false; paintAll(); }
+  if (!drag) { return; }
+  const d = drag;
+  drag = null;
+
+  if (d.mode === "belt") {
+    commitBeltRun(d.path);
+  } else if (d.mode === "band") {
+    const [xa, xb] = [Math.min(d.x0, d.x1), Math.max(d.x0, d.x1)];
+    const [ya, yb] = [Math.min(d.y0, d.y1), Math.max(d.y0, d.y1)];
+    ui.multiSel = new Set(
+      G.board
+        .filter((p) => p.m !== "vault" && p.x >= xa && p.x <= xb && p.y >= ya && p.y <= yb)
+        .map((p) => tk(p.x, p.y)),
+    );
+    ui.selected = null;
+  } else if (d.mode === "maybe-move") {
+    // never left the tile: it's a click — select, or rotate if already selected
+    const { x, y } = d.start;
+    if (ui.selected && ui.selected.x === x && ui.selected.y === y) {
+      cmd(core.rotate(x, y));
+    }
+    if (!ui.multiSel.has(tk(x, y))) ui.multiSel.clear();
+    ui.selected = { x, y };
+    const now = at(x, y);
+    if (now?.d) ui.dir = now.d;
+  } else if (d.mode === "move") {
+    commitMove(d);
+  }
+  paintAll();
 });
 
 window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    ui.multiSel.clear();
+    ui.selected = null;
+    drag = null;
+    paintAll();
+    return;
+  }
   if (buildLocked()) {
     if (e.key === " ") e.preventDefault();
     return;

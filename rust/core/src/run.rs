@@ -204,6 +204,48 @@ impl Game {
         Ok(())
     }
 
+    /// Move every machine on `tiles` by (dx, dy), as one rigid piece.
+    /// All-or-nothing: if any destination is off the board or occupied by a
+    /// machine that isn't itself moving, nothing moves. The Vault is bolted
+    /// down — selections simply flow around it. Free, like all build edits.
+    pub fn move_by(&mut self, tiles: &[(i32, i32)], dx: i32, dy: i32) -> Result<(), String> {
+        if self.phase != GamePhase::Build {
+            return Err("not in build phase".into());
+        }
+        if dx == 0 && dy == 0 {
+            return Ok(());
+        }
+        let moving: Vec<usize> = self
+            .board
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.m != MachineId::Vault && tiles.contains(&(p.x, p.y)))
+            .map(|(i, _)| i)
+            .collect();
+        if moving.is_empty() {
+            return Err("nothing movable selected".into());
+        }
+        for &i in &moving {
+            let (nx, ny) = (self.board[i].x + dx, self.board[i].y + dy);
+            if !Self::in_bounds(nx, ny) {
+                return Err(format!("move would leave the board at {nx},{ny}"));
+            }
+            let blocked = self
+                .board
+                .iter()
+                .enumerate()
+                .any(|(j, q)| !moving.contains(&j) && q.x == nx && q.y == ny);
+            if blocked {
+                return Err(format!("tile {nx},{ny} is occupied"));
+            }
+        }
+        for i in moving {
+            self.board[i].x += dx;
+            self.board[i].y += dy;
+        }
+        Ok(())
+    }
+
     /// The shift as a steppable sim — same board, same seed as `run_shift`,
     /// so a renderer can animate tick by tick and the committed result is
     /// guaranteed identical.

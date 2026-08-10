@@ -92,6 +92,61 @@ fn stepped_shift_sim_matches_the_committed_shift_exactly() {
 }
 
 #[test]
+fn move_preserves_direction_and_config() {
+    let mut g = Game::new(1);
+    let mut p = overflow_core::sim::Placement::new(2, 2, MachineId::Filter, Some(Dir::E));
+    p.d2 = Some(Dir::N);
+    p.cfg = Some(FilterCfg { min_quality: Some(7), item_type: None });
+    g.board.push(p);
+    g.move_by(&[(2, 2)], 3, 1).unwrap();
+    let q = g.board.iter().find(|p| p.x == 5 && p.y == 3).unwrap();
+    assert_eq!(q.d, Some(Dir::E));
+    assert_eq!(q.d2, Some(Dir::N));
+    assert_eq!(q.cfg.unwrap().min_quality, Some(7));
+}
+
+#[test]
+fn group_move_is_rigid_even_through_its_own_footprint() {
+    // A machine and its belt move one tile east — the belt's destination is
+    // the machine's old tile. Legal, because the whole piece moves at once.
+    let mut g = Game::new(1);
+    play_first(&mut g, 0, 0);
+    g.buy_belt(1, 0, Dir::E).unwrap();
+    g.move_by(&[(0, 0), (1, 0)], 1, 0).unwrap();
+    assert!(g.board.iter().any(|p| p.x == 1 && p.y == 0 && p.m != MachineId::Belt));
+    assert!(g.board.iter().any(|p| p.x == 2 && p.y == 0 && p.m == MachineId::Belt));
+}
+
+#[test]
+fn blocked_or_out_of_bounds_group_move_changes_nothing() {
+    let mut g = Game::new(1);
+    play_first(&mut g, 0, 0);
+    g.buy_belt(1, 0, Dir::E).unwrap();
+    g.buy_belt(3, 0, Dir::E).unwrap(); // a stationary obstacle
+
+    // (1,0) -> (3,0) collides with the stationary belt: atomically refused.
+    assert!(g.move_by(&[(0, 0), (1, 0)], 2, 0).is_err());
+    assert!(g.board.iter().any(|p| p.x == 0 && p.y == 0));
+    assert!(g.board.iter().any(|p| p.x == 1 && p.y == 0));
+
+    // Off the west edge: refused.
+    assert!(g.move_by(&[(0, 0)], -1, 0).is_err());
+    assert!(g.board.iter().any(|p| p.x == 0 && p.y == 0));
+}
+
+#[test]
+fn the_vault_stays_bolted_down() {
+    let mut g = Game::new(1);
+    // Selecting only the vault: nothing movable.
+    assert!(g.move_by(&[(9, 3)], 1, 0).is_err());
+    // A selection sweeping over the vault moves everything else and leaves it.
+    g.buy_belt(8, 3, Dir::E).unwrap();
+    g.move_by(&[(8, 3), (9, 3)], 0, 1).unwrap();
+    assert!(g.board.iter().any(|p| p.x == 9 && p.y == 3 && p.m == MachineId::Vault));
+    assert!(g.board.iter().any(|p| p.x == 8 && p.y == 4 && p.m == MachineId::Belt));
+}
+
+#[test]
 fn audits_fall_on_rounds_4_8_and_12() {
     let audits: Vec<usize> = (0..12).filter(|&r| is_audit(r)).collect();
     assert_eq!(audits, vec![3, 7, 11]);

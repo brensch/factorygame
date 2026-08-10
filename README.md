@@ -15,15 +15,10 @@ catalogue, the six-phase round loop, and a complete 12-round walkthrough.
 
 It's a single self-contained HTML file: no build step, no CDN.
 
-**Read it in a browser right now:**
-[htmlpreview.github.io/?…/docs/index.html](https://htmlpreview.github.io/?https://raw.githubusercontent.com/brensch/factorygame/main/docs/index.html)
+**→ [brensch.github.io/factorygame](https://brensch.github.io/factorygame/)**
 
-That works with zero setup because the repo is public. For a proper URL —
-`https://brensch.github.io/factorygame/` — Pages needs enabling **once**, at
-Settings → Pages → Source: *GitHub Actions*. After that the workflow in
-`.github/workflows/pages.yml` deploys on every change to `docs/`, and the same
-mechanism will serve playable web builds later. A workflow cannot enable Pages for
-itself; it needs an admin-scoped token, which `GITHUB_TOKEN` never has.
+Deployed by `.github/workflows/pages.yml` on every change to `docs/`. The same
+pipeline will serve playable web builds later.
 
 ## 🧪 The reference simulation
 

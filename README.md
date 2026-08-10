@@ -47,7 +47,14 @@ replay, headless balance testing, and a late-game board with 2,000 items drawn i
 
 The TypeScript sim here is deliberately written to that constraint so it ports mechanically.
 
+## Toolchain
+
+No editor, no IDE. Godot is a single binary and a Godot project is entirely plain text, so the
+whole loop — write, import, test, export, screenshot — runs from the command line on a headless
+box with no GPU. See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the verified commands and the honest
+limits.
+
 ## Status
 
-Design + reference sim. No game yet. See [`NOTES.md`](NOTES.md) for what's unverified and what
-comes next.
+Design + reference sim + a verified headless toolchain. No game yet. See [`NOTES.md`](NOTES.md)
+for what's unverified and what comes next.

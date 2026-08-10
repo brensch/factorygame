@@ -13,6 +13,9 @@ believes its own marketing.
 | Sim is deterministic under a fixed seed | ✅ test |
 | Sim is independent of placement/iteration order | ✅ test |
 | Heat Sink's `onlyTag` aura doesn't leak onto non-HEAT machines | ✅ test |
+| Filter ejects on a quality gate, and only at the gate | ✅ test |
+| Splitter round-robins fairly between two outputs | ✅ test |
+| Closed loop + gate actually pays out (18 credits from 7 quality-6 ore) | ✅ test |
 | Rounds 7 and 11 payouts (1,580 / 19,500) | ❌ hand-estimated |
 | The whole quota curve (§9 of the doc) | ❌ hand-authored target, not fitted |
 | That any of this is *fun* | ❌ entirely unproven |
@@ -23,18 +26,15 @@ so both the board and the prose were corrected. That is the sim earning its keep
 
 ## Not implemented in the reference sim
 
-These are the mechanics rounds 7 and 11 depend on, which is exactly why those payouts are
-estimates:
+**Filter and Splitter now exist** (added with the prototype), which is what unblocked the playable
+loop. Still missing:
 
-- **Filter** — matching items eject sideways, everything else passes straight. Needs a second
-  output direction per tile and a predicate (item type, or `quality >= n`). This is the single
-  most important missing piece: without it, loops have no exit and the whole polish-loop build
-  can't be measured.
-- **Splitter** — round-robin across up to 3 output edges.
-- **Duplicator** — currently a rough approximation (queues a clone in the tile's input list).
-  The real question is what happens when a clone has nowhere to go.
 - **Underpass**, **Buffer** release policy, **Compressor** N-to-1 with mixed qualities.
-- Relics, audits, the shop, and the economy. None of the run structure exists — only one shift.
+- **Duplicator** is still approximate: a clone queues behind the original and is released when the
+  output slot frees. The real question — what happens when a clone has nowhere to go — is
+  unanswered, and it matters, because that is exactly the failure mode the design leans on.
+- Relics and audit modifiers. The prototype has rounds, quota and unlocks, but audits are only
+  flagged in the header; they do not yet change any rule.
 
 ## Design questions I could not resolve on paper
 

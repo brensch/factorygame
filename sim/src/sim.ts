@@ -3,7 +3,7 @@
  *
  * This is the whole game. Everything else is presentation.
  *
- * Deliberate properties, all of which the eventual Godot port must preserve:
+ * Deliberate properties, all of which the eventual engine port must preserve:
  *   - Pure data. No rendering, no engine types, no wall-clock time.
  *   - Deterministic. Same board + same seed => same result, every time.
  *   - Order-independent. Tile iteration order never affects the outcome.
@@ -14,21 +14,34 @@
 import { DEFS, DIRV, itemValue, QUALITY_CAP, type Dir, type MachineDef } from "./defs";
 
 export interface Item {
+  /** Stable identity, so a renderer can animate an item between tiles. */
+  id: number;
   type: string;
   quality: number;
 }
 
-/** A machine placed on the board. `d` is the output edge. */
+/** Filter predicate. An item matches if any set condition holds. */
+export interface FilterCfg {
+  minQuality?: number;
+  itemType?: string;
+}
+
+/** A machine placed on the board. `d` is the output edge, `d2` the secondary. */
 export interface Placement {
   x: number;
   y: number;
   t: string;
   d?: Dir;
+  /** Filter: the eject edge. Splitter: the second round-robin edge. */
+  d2?: Dir;
+  cfg?: FilterCfg;
 }
 
 interface Tile {
   def: MachineDef | null;
   d: Dir | null;
+  d2: Dir | null;
+  cfg: FilterCfg | null;
   /** The finished item waiting on the output edge. At most one. */
   out: Item | null;
   /** Items consumed but not yet assembled. */
@@ -40,6 +53,15 @@ interface Tile {
   /** Aura-granted quality added to this machine's output. */
   qualityOut: number;
   jamImmune: boolean;
+  /** Splitter round-robin cursor. */
+  rr: number;
+}
+
+/** One item hop, emitted per tick so a renderer can interpolate motion. */
+export interface Move {
+  id: number;
+  from: number;
+  to: number;
 }
 
 export interface Delivery {
@@ -56,29 +78,30 @@ export interface ShiftResult {
   payout: number;
   /** Items still on belts when the shift ended — these are forfeit. */
   inFlight: number;
-  /** Tick counts where at least one machine was blocked on a full output. */
+  /** Ticks on which a machine finished work it could not hand off. */
   jamTicks: number;
   byType: Record<string, number>;
 }
-
-const OPP: Record<Dir, Dir> = { N: "S", S: "N", E: "W", W: "E" };
 
 export class Sim {
   readonly w: number;
   readonly h: number;
   private tiles: Tile[];
   private rngState: number;
+  private nextId = 1;
   tick = 0;
   delivered: Delivery[] = [];
   jamTicks = 0;
+  /** Moves that happened on the most recent `step()`. Cleared each tick. */
+  moves: Move[] = [];
 
   constructor(w: number, h: number, placements: Placement[], seed = 0xc0ffee) {
     this.w = w;
     this.h = h;
     this.rngState = seed >>> 0;
     this.tiles = Array.from({ length: w * h }, () => ({
-      def: null, d: null, out: null, inputs: [],
-      progress: 0, speed: 1, qualityOut: 0, jamImmune: false,
+      def: null, d: null, d2: null, cfg: null, out: null, inputs: [],
+      progress: 0, speed: 1, qualityOut: 0, jamImmune: false, rr: 0,
     }));
 
     for (const p of placements) {
@@ -90,6 +113,8 @@ export class Sim {
       if (t.def) throw new Error(`two machines on tile ${p.x},${p.y}`);
       t.def = def;
       t.d = p.d ?? null;
+      t.d2 = p.d2 ?? null;
+      t.cfg = p.cfg ?? null;
     }
 
     this.applyAuras(placements);
@@ -98,6 +123,17 @@ export class Sim {
   /** Test/debug accessor: the item sitting on a tile's output edge, if any. */
   peek(x: number, y: number): Item | null {
     return this.tiles[this.idx(x, y)].out;
+  }
+
+  /** Everything a renderer needs about a tile, without exposing internals. */
+  view(x: number, y: number) {
+    const t = this.tiles[this.idx(x, y)];
+    return {
+      def: t.def, d: t.d, d2: t.d2, cfg: t.cfg,
+      out: t.out, inputs: t.inputs.slice(),
+      speed: t.speed, qualityOut: t.qualityOut, jamImmune: t.jamImmune,
+      progress: t.progress,
+    };
   }
 
   private idx(x: number, y: number) { return y * this.w + x; }
@@ -110,6 +146,10 @@ export class Sim {
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  private mk(type: string, quality: number): Item {
+    return { id: this.nextId++, type, quality: Math.min(QUALITY_CAP, quality) };
   }
 
   /**
@@ -137,11 +177,31 @@ export class Sim {
     }
   }
 
-  private target(i: number): number {
+  /**
+   * Which edge does this item leave by? Constant for most machines; for a
+   * Filter it depends on the item, and for a Splitter on the round-robin
+   * cursor. Both are pure functions of current state, so determinism holds.
+   */
+  private outDir(i: number, item: Item): Dir | null {
     const t = this.tiles[i];
-    if (!t.d) return -1;
+    if (!t.def) return null;
+    if (t.def.id === "filter" && t.d2) {
+      const c = t.cfg ?? {};
+      const match =
+        (c.minQuality !== undefined && item.quality >= c.minQuality) ||
+        (c.itemType !== undefined && item.type === c.itemType);
+      return match ? t.d2 : t.d;
+    }
+    if (t.def.id === "splitter" && t.d2) {
+      return t.rr % 2 === 0 ? t.d : t.d2;
+    }
+    return t.d;
+  }
+
+  private neighbour(i: number, d: Dir | null): number {
+    if (!d) return -1;
     const [x, y] = this.xy(i);
-    const [dx, dy] = DIRV[t.d];
+    const [dx, dy] = DIRV[d];
     const nx = x + dx, ny = y + dy;
     if (nx < 0 || ny < 0 || nx >= this.w || ny >= this.h) return -1;
     return this.idx(nx, ny);
@@ -163,7 +223,7 @@ export class Sim {
     return false; // extractors and pure modifiers never accept
   }
 
-  /** Structural compatibility, ignoring current occupancy. Used to build the flow graph. */
+  /** Structural compatibility, ignoring occupancy. Used to build the flow graph. */
   private couldAccept(i: number, item: Item): boolean {
     const t = this.tiles[i];
     if (!t.def) return false;
@@ -185,20 +245,18 @@ export class Sim {
     if (def.transport) {
       let q = item.quality;
       if (def.qualityBonus) q = Math.min(QUALITY_CAP, q + def.qualityBonus);
-      t.out = { type: item.type, quality: q };
-      // Duplicator: 15% chance to clone. The clone lands in the same tile's
-      // slot only if empty next tick, so in practice it feeds the next tile —
-      // modelled here as an immediate extra item pushed into the delivery path.
-      if (def.id === "dup" && this.rand() < 0.15) t.inputs.push({ ...t.out });
+      t.out = { id: item.id, type: item.type, quality: q };
+      // Duplicator: a clone queues behind the original and is released as soon
+      // as the output slot frees. Inside a loop this is the exponential.
+      if (def.id === "dup" && this.rand() < 0.15) {
+        t.inputs.push(this.mk(t.out.type, t.out.quality));
+      }
       return;
     }
     t.inputs.push(item);
   }
 
-  /**
-   * Production pass: advance every machine's cycle, and move finished goods
-   * onto the output edge.
-   */
+  /** Production pass: advance cycles, move finished goods to the output edge. */
   private produce() {
     for (let i = 0; i < this.tiles.length; i++) {
       const t = this.tiles[i];
@@ -219,7 +277,7 @@ export class Sim {
         t.progress += t.speed;
         if (t.progress >= def.period) {
           t.progress -= def.period;
-          t.out = { type: def.produces, quality: def.spawnQuality ?? 0 };
+          t.out = this.mk(def.produces, def.spawnQuality ?? 0);
         }
         continue;
       }
@@ -244,13 +302,19 @@ export class Sim {
             consumed.push(t.inputs.splice(k, 1)[0]);
           }
           const meanQ = consumed.reduce((a, b) => a + b.quality, 0) / consumed.length;
-          t.out = {
-            type: r.output,
-            quality: Math.min(QUALITY_CAP, Math.floor(meanQ) + t.qualityOut),
-          };
+          t.out = this.mk(r.output, Math.floor(meanQ) + t.qualityOut);
         }
       }
     }
+  }
+
+  private commitMove(i: number, j: number) {
+    const t = this.tiles[i];
+    const item = t.out!;
+    t.out = null;
+    this.moves.push({ id: item.id, from: i, to: j });
+    if (t.def!.id === "splitter") t.rr++;
+    this.put(j, item);
   }
 
   /**
@@ -274,7 +338,7 @@ export class Sim {
     for (let i = 0; i < n; i++) {
       const t = this.tiles[i];
       if (!t.def || t.out === null) continue;
-      const j = this.target(i);
+      const j = this.neighbour(i, this.outDir(i, t.out));
       if (j < 0 || !this.couldAccept(j, t.out)) continue;
       edge[i] = j;
     }
@@ -332,8 +396,7 @@ export class Sim {
         const t = this.tiles[i];
         if (j < 0 || t.out === null) continue;
         if (this.canAccept(j, t.out)) {
-          const item = t.out; t.out = null;
-          this.put(j, item);
+          this.commitMove(i, j);
         } else if (!t.jamImmune && !t.def!.transport) {
           // Belts stalled behind a busy machine are normal backpressure, not a
           // jam. Only a machine that finished work it cannot hand off counts.
@@ -346,7 +409,7 @@ export class Sim {
       // so they rotate simultaneously. Snapshot first, then commit — otherwise
       // the result depends on iteration order, which is exactly what we forbid.
       const snapshot = comp.map((i) => this.tiles[i].out);
-      const movable = comp.every((i, k) => snapshot[k] !== null);
+      const movable = comp.every((_, k) => snapshot[k] !== null);
       if (!movable) {
         // Partially empty ring: the hole propagates backward around the loop.
         // Sort by tile index and mark destinations so nothing moves twice, so
@@ -360,8 +423,7 @@ export class Sim {
             const j = edge[i];
             if (j < 0 || t.out === null || moved.has(i)) continue;
             if (!this.canAccept(j, t.out)) continue;
-            const item = t.out; t.out = null;
-            this.put(j, item);
+            this.commitMove(i, j);
             moved.add(j);
             changed = true;
           }
@@ -370,18 +432,28 @@ export class Sim {
         continue;
       }
       for (const i of comp) this.tiles[i].out = null;
-      comp.forEach((i, k) => this.put(edge[i], snapshot[k]!));
+      comp.forEach((i, k) => {
+        const item = snapshot[k]!;
+        this.moves.push({ id: item.id, from: i, to: edge[i] });
+        if (this.tiles[i].def!.id === "splitter") this.tiles[i].rr++;
+        this.put(edge[i], item);
+      });
     }
   }
 
   step() {
     this.tick++;
+    this.moves = [];
     this.produce();
     this.transfer();
   }
 
   run(ticks = 60): ShiftResult {
     for (let i = 0; i < ticks; i++) this.step();
+    return this.result(ticks);
+  }
+
+  result(ticks = this.tick): ShiftResult {
     let inFlight = 0;
     for (const t of this.tiles) {
       if (t.out) inFlight++;

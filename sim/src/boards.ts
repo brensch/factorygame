@@ -76,3 +76,40 @@ export const LOOP_RIG: { w: number; h: number; cells: Placement[] } = {
     // (1,1) -> (2,1) -> (3,1) -> (3,2) -> (2,2) -> (1,2) -> (1,1): a closed ring
   ],
 };
+
+/**
+ * A gated polish loop: an 8-tile ring with two Polishers and a Filter set to
+ * eject at quality >= 5. This is the build the whole design rests on, so it
+ * gets a board of its own. Items enter at quality 0, gain +2 per lap, and leave
+ * on their third lap.
+ */
+export const GATED_LOOP: { w: number; h: number; cells: Placement[] } = {
+  w: 5, h: 4,
+  cells: [
+    { x: 0, y: 1, t: "drill", d: "E" },
+    { x: 1, y: 1, t: "belt", d: "E" },
+    // the ring
+    { x: 2, y: 1, t: "belt", d: "E" },
+    { x: 3, y: 1, t: "polisher", d: "E" },
+    { x: 4, y: 1, t: "belt", d: "S" },
+    { x: 4, y: 2, t: "belt", d: "S" },
+    { x: 4, y: 3, t: "belt", d: "W" },
+    { x: 3, y: 3, t: "polisher", d: "W" },
+    { x: 2, y: 3, t: "belt", d: "N" },
+    { x: 2, y: 2, t: "filter", d: "N", d2: "W", cfg: { minQuality: 5 } },
+    // the exit
+    { x: 1, y: 2, t: "belt", d: "W" },
+    { x: 0, y: 2, t: "vault" },
+  ],
+};
+
+/** A Splitter feeding two vaults, for checking round-robin fairness. */
+export const SPLIT_RIG: { w: number; h: number; cells: Placement[] } = {
+  w: 4, h: 3,
+  cells: [
+    { x: 0, y: 1, t: "drill", d: "E" },
+    { x: 1, y: 1, t: "splitter", d: "E", d2: "N" },
+    { x: 2, y: 1, t: "vault" },
+    { x: 1, y: 0, t: "vault" },
+  ],
+};

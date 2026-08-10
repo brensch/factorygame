@@ -8,6 +8,21 @@ surplus on machines and relics. The quota steps ~1.8× per round; adding another
 1.3×. So the game forces you off addition and onto multipliers — adjacency auras, tag resonance,
 and closed belt loops that circulate items through Polishers until they qualify to leave.
 
+## 🎮 Play the prototype
+
+**→ [brensch.github.io/factorygame/play/](https://brensch.github.io/factorygame/play/)**
+
+Twelve rounds, quota nearly doubling each time. Drag to lay belts, click machines to rotate,
+right-click to remove (full refund — experimenting is free). The projection panel runs the whole
+shift before you commit.
+
+This exists to answer one question: **is it fun?** It is not the game. It's a browser shell around
+the reference sim, deliberately built in a few hours so the design can be judged before anyone
+commits to an engine. Every rule it plays by comes from `sim/` — it contains no game logic of its
+own, so it cannot drift from the tested implementation.
+
+Build it locally with `cd sim && bun run build:play && bun run serve`.
+
 ## 📄 The design document
 
 **[`docs/index.html`](docs/index.html)** — the whole design, with SVG board diagrams, the machine

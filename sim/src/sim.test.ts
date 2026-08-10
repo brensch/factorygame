@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Sim, runBoard, type Placement } from "./sim";
-import { ROUND_1, ROUND_4, LOOP_RIG } from "./boards";
+import { ROUND_1, ROUND_4, LOOP_RIG, GATED_LOOP, SPLIT_RIG } from "./boards";
 import { itemValue, QUALITY_CAP } from "./defs";
 
 describe("value arithmetic", () => {
@@ -108,5 +108,54 @@ describe("simulation invariants", () => {
 
   test("rejects out-of-bounds placement", () => {
     expect(() => new Sim(3, 3, [{ x: 5, y: 0, t: "drill", d: "E" }])).toThrow(/out of bounds/);
+  });
+});
+
+describe("Filter — the gate that makes loops useful", () => {
+  const r = runBoard(GATED_LOOP.w, GATED_LOOP.h, GATED_LOOP.cells, 60);
+
+  test("items leave the ring once they meet the quality gate", () => {
+    expect(r.byType.ore).toBeGreaterThan(0);
+  });
+
+  test("everything delivered is at or above the gate, and no higher than needed", () => {
+    // two Polishers per lap, entering at 0, gate at 5 => ejects on the lap it hits 6
+    expect([...new Set(r.delivered.map((d) => d.quality))]).toEqual([6]);
+  });
+
+  test("quality actually multiplied the payout", () => {
+    // 7 ore at base 1 would be 7 credits; at quality 6 each is worth 2.5
+    expect(r.payout).toBe(18);
+  });
+});
+
+describe("Splitter", () => {
+  test("round-robins fairly between its two outputs", () => {
+    const s = new Sim(SPLIT_RIG.w, SPLIT_RIG.h, SPLIT_RIG.cells);
+    let east = 0, north = 0;
+    for (let i = 0; i < 60; i++) {
+      s.step();
+      for (const m of s.moves) {
+        if (m.to === 1 * 4 + 2) east++;
+        if (m.to === 0 * 4 + 1) north++;
+      }
+    }
+    expect(east).toBe(north);
+    expect(east + north).toBeGreaterThan(10);
+  });
+});
+
+describe("renderer contract", () => {
+  test("every item has a stable id and moves are reported per tick", () => {
+    const s = new Sim(ROUND_1.w, ROUND_1.h, ROUND_1.cells);
+    const seen = new Set<number>();
+    for (let i = 0; i < 30; i++) {
+      s.step();
+      for (const m of s.moves) {
+        expect(m.id).toBeGreaterThan(0);
+        seen.add(m.id);
+      }
+    }
+    expect(seen.size).toBeGreaterThan(3);
   });
 });

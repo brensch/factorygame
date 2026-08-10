@@ -1,0 +1,9 @@
+node_modules/
+bun.lockb
+.DS_Store
+*.log
+
+# Godot, for when the project starts
+.godot/
+.import/
+export_presets.cfg

@@ -1,0 +1,6 @@
+{
+  "name": "overflow-sim",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test", "report": "bun run src/report.ts" }
+}

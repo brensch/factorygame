@@ -1,0 +1,1506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OVERFLOW — a Factorio roguelite: design document</title>
+<style>
+  :root{
+    color-scheme: dark;
+    --page:        #0b0e13;
+    --surface:     #151a22;
+    --surface-2:   #1b222c;
+    --line:        #262f3b;
+    --line-soft:   #1f2732;
+    --ink:         #e8eef6;
+    --ink-2:       #9fb0c3;
+    --ink-muted:   #6f8095;
+
+    /* illustration palette — category identity, always paired with a text label */
+    --extractor:   #f0a63a;
+    --processor:   #e8623c;
+    --assembler:   #8b7bf0;
+    --modifier:    #34c8b0;
+    --logistics:   #647890;
+    --vault:       #6fcf5f;
+
+    /* chart series — validated vs surface #151a22 (dark, categorical) */
+    --series-1:    #3987e5;   /* delivered */
+    --series-2:    #d95926;   /* quota */
+    --grid:        #2c333d;
+    --baseline:    #38414d;
+
+    --radius: 10px;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--page); color:var(--ink);
+    font-family:var(--sans); font-size:16px; line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1120px; margin:0 auto; padding:0 28px 120px}
+
+  /* ---------- hero ---------- */
+  header.hero{
+    border-bottom:1px solid var(--line);
+    background:
+      radial-gradient(900px 400px at 15% -10%, rgba(240,166,58,.10), transparent 60%),
+      radial-gradient(700px 380px at 85% -20%, rgba(52,200,176,.09), transparent 60%);
+  }
+  .hero-inner{max-width:1120px;margin:0 auto;padding:64px 28px 52px}
+  .eyebrow{
+    font:600 12px/1 var(--mono); letter-spacing:.16em; text-transform:uppercase;
+    color:var(--ink-muted); margin:0 0 18px;
+  }
+  h1{
+    margin:0 0 6px; font-size:clamp(42px,7vw,76px); line-height:.98;
+    letter-spacing:-.03em; font-weight:700;
+  }
+  h1 .dim{color:var(--ink-muted)}
+  .tagline{font-size:20px;color:var(--ink-2);margin:0 0 26px;max-width:62ch}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{
+    font:600 12px/1 var(--sans); letter-spacing:.02em;
+    padding:7px 11px; border:1px solid var(--line); border-radius:999px;
+    color:var(--ink-2); background:var(--surface);
+  }
+
+  /* ---------- structure ---------- */
+  section{padding-top:64px}
+  h2{
+    font-size:13px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+    color:var(--ink-muted); font-family:var(--mono);
+    margin:0 0 10px; padding-bottom:10px; border-bottom:1px solid var(--line);
+  }
+  h3{font-size:26px; letter-spacing:-.02em; margin:26px 0 10px; font-weight:650}
+  h4{font-size:16px; margin:22px 0 6px; font-weight:650}
+  p{margin:0 0 14px; color:var(--ink-2); max-width:76ch}
+  p.lead{color:var(--ink); font-size:18px}
+  strong{color:var(--ink); font-weight:650}
+  a{color:#7fb6f5}
+  code{font-family:var(--mono); font-size:.87em; background:var(--surface-2);
+       border:1px solid var(--line-soft); border-radius:5px; padding:1px 5px; color:#cfe0f2}
+  ul,ol{color:var(--ink-2); max-width:76ch; padding-left:20px}
+  li{margin:5px 0}
+  li::marker{color:var(--ink-muted)}
+
+  .card{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius); padding:22px 24px}
+  .grid2{display:grid; grid-template-columns:repeat(2,1fr); gap:16px}
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  @media(max-width:820px){.grid2,.grid3{grid-template-columns:1fr}}
+
+  table{width:100%; border-collapse:collapse; margin:14px 0; font-size:14.5px}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--line-soft); vertical-align:top}
+  th{color:var(--ink-muted); font:600 11px/1.4 var(--mono); letter-spacing:.1em; text-transform:uppercase}
+  td{color:var(--ink-2)}
+  td:first-child{color:var(--ink); font-weight:600}
+  tbody tr:hover{background:rgba(255,255,255,.02)}
+  .num{font-variant-numeric:tabular-nums; text-align:right}
+
+  .callout{
+    border-left:3px solid var(--extractor); background:var(--surface);
+    border-radius:0 var(--radius) var(--radius) 0; padding:16px 20px; margin:20px 0;
+  }
+  .callout.teal{border-left-color:var(--modifier)}
+  .callout.violet{border-left-color:var(--assembler)}
+  .callout p:last-child{margin-bottom:0}
+  .callout .k{font:600 11px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--ink-muted); display:block; margin-bottom:7px}
+
+  figure{margin:22px 0}
+  figcaption{color:var(--ink-muted); font-size:13.5px; margin-top:10px; max-width:80ch}
+  figcaption b{color:var(--ink-2)}
+
+  .board-frame{
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px; overflow-x:auto;
+  }
+  .legend-row{display:flex;flex-wrap:wrap;gap:14px;margin-top:14px}
+  .lg{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2)}
+  .lg i{width:11px;height:11px;border-radius:3px;display:inline-block}
+
+  .mcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px}
+  .mcard .top{display:flex;align-items:center;gap:11px;margin-bottom:9px}
+  .mcard .tile{width:34px;height:34px;border-radius:7px;display:grid;place-items:center;
+    font:700 10px/1 var(--mono);color:#0b0e13;flex:none;letter-spacing:.03em}
+  .mcard h5{margin:0;font-size:15.5px;font-weight:650;color:var(--ink)}
+  .mcard .cost{margin-left:auto;font:600 12px/1 var(--mono);color:var(--extractor)}
+  .mcard p{font-size:13.5px;margin:0;color:var(--ink-2)}
+  .tags{display:flex;gap:5px;margin-top:10px;flex-wrap:wrap}
+  .tag{font:600 10px/1 var(--mono);letter-spacing:.09em;padding:4px 6px;border-radius:4px;
+    border:1px solid var(--line);color:var(--ink-muted)}
+  .tag.HEAT{color:#f08a5a;border-color:rgba(240,138,90,.32)}
+  .tag.KINETIC{color:#f0a63a;border-color:rgba(240,166,58,.32)}
+  .tag.VOLT{color:#5fa8f5;border-color:rgba(95,168,245,.32)}
+  .tag.PRECISION{color:#8b7bf0;border-color:rgba(139,123,240,.32)}
+  .tag.ORGANIC{color:#6fcf5f;border-color:rgba(111,207,95,.32)}
+
+  .phase{display:grid;grid-template-columns:196px 1fr;gap:22px;align-items:start;
+    background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px 22px;margin-bottom:14px}
+  @media(max-width:760px){.phase{grid-template-columns:1fr}}
+  .phase h4{margin:0 0 4px;font-size:19px}
+  .phase .pn{font:700 11px/1 var(--mono);letter-spacing:.14em;color:var(--ink-muted);margin-bottom:8px}
+  .phase p{font-size:14.5px;margin-bottom:10px}
+  .phase ul{font-size:14px;margin:0}
+
+  .step{border-left:2px solid var(--line);padding:2px 0 2px 22px;margin:0 0 30px;position:relative}
+  .step::before{content:"";position:absolute;left:-6px;top:9px;width:10px;height:10px;border-radius:50%;
+    background:var(--extractor);box-shadow:0 0 0 4px var(--page)}
+  .step.audit::before{background:var(--processor)}
+  .step .rnd{font:700 11px/1 var(--mono);letter-spacing:.14em;color:var(--ink-muted);margin-bottom:6px}
+  .step h3{margin:0 0 8px}
+
+  .stats{display:flex;flex-wrap:wrap;gap:10px;margin:14px 0}
+  .stat{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 14px;min-width:120px}
+  .stat .l{font:600 10px/1 var(--mono);letter-spacing:.11em;text-transform:uppercase;color:var(--ink-muted)}
+  .stat .v{font-size:21px;font-weight:650;color:var(--ink);margin-top:5px;line-height:1.1}
+  .stat .v.good{color:#6fcf5f}
+  .stat .v.bad{color:#e8623c}
+
+  .toc{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+  .toc a{font:600 12.5px/1 var(--sans);text-decoration:none;color:var(--ink-2);
+    border:1px solid var(--line);background:var(--surface);border-radius:7px;padding:8px 12px}
+  .toc a:hover{border-color:var(--ink-muted);color:var(--ink)}
+
+  .chart-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:22px 24px 18px}
+  .chart-title{font-size:17px;font-weight:650;color:var(--ink);margin:0}
+  .chart-sub{font-size:13.5px;color:var(--ink-muted);margin:4px 0 6px}
+  .chart-legend{display:flex;gap:18px;margin:10px 0 2px}
+  .chart-legend span{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ink-2)}
+  .chart-legend i{width:16px;height:3px;border-radius:2px;display:inline-block}
+  #tip{position:absolute;pointer-events:none;opacity:0;transition:opacity .09s;
+    background:#0d1219;border:1px solid var(--line);border-radius:8px;padding:9px 11px;
+    font-size:12.5px;color:var(--ink);min-width:150px;box-shadow:0 8px 26px rgba(0,0,0,.5);z-index:9}
+  #tip .r{display:flex;justify-content:space-between;gap:16px;font-variant-numeric:tabular-nums}
+  #tip .r span:first-child{color:var(--ink-2);display:flex;align-items:center;gap:7px}
+  #tip .h{font-weight:650;margin-bottom:6px}
+  #tip i{width:9px;height:9px;border-radius:2px;display:inline-block}
+  .tbl-toggle{margin-top:14px;background:var(--surface-2);color:var(--ink-2);border:1px solid var(--line);
+    border-radius:7px;padding:7px 12px;font:600 12.5px var(--sans);cursor:pointer}
+  .tbl-toggle:hover{color:var(--ink);border-color:var(--ink-muted)}
+  #curveTable[hidden]{display:none}
+  footer{margin-top:80px;padding-top:24px;border-top:1px solid var(--line);color:var(--ink-muted);font-size:13.5px}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <p class="eyebrow">Game design document · v0.1</p>
+    <h1>OVERFLOW<span class="dim">.</span></h1>
+    <p class="tagline">A grid-building factory roguelite. Place machines, route the belts, run the shift.
+      Every round the quota doubles — so your factory has to do more than grow, it has to
+      <strong>compound</strong>.</p>
+    <div class="chips">
+      <span class="chip">2D · top-down grid</span>
+      <span class="chip">Godot 4.x</span>
+      <span class="chip">Run length ≈ 45 min</span>
+      <span class="chip">12 rounds · 3 acts</span>
+      <span class="chip">Deterministic seeded sim</span>
+    </div>
+    <nav class="toc">
+      <a href="#engine">1 · Engine</a>
+      <a href="#pillars">2 · Pillars</a>
+      <a href="#board">3 · The board</a>
+      <a href="#chain">4 · Value chain</a>
+      <a href="#machines">5 · Machines</a>
+      <a href="#synergy">6 · Synergies</a>
+      <a href="#phases">7 · The six phases</a>
+      <a href="#walkthrough">8 · Full walkthrough</a>
+      <a href="#curve">9 · The curve</a>
+      <a href="#meta">10 · Meta-progression</a>
+      <a href="#build">11 · Build plan</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ══════════════════════════ 1 ENGINE ══════════════════════════ -->
+<section id="engine">
+  <h2>1 · Engine recommendation</h2>
+  <h3>Godot 4.x, GDScript, no physics</h3>
+  <p class="lead">Godot 4 is the 2D engine I'm most confident in, and it happens to be the right
+    call for this game specifically rather than just generically.</p>
+  <p>The reasons that matter here: its 2D renderer is a first-class citizen rather than a 3D engine
+    with the Z axis switched off; the scene/node model maps cleanly onto "a tile has a machine has a
+    module"; the editor gives you a tuning loop measured in seconds; <code>Resource</code> files let you
+    define every machine, module and relic as data you can hot-edit while the game runs; and it exports
+    to desktop and web from one project with no licensing conversation.</p>
+  <p>The critical architectural point: <strong>this game has no physics and no per-item nodes.</strong>
+    The factory is a deterministic tick simulation over a 2D array. Items are structs in a list, not
+    scene nodes. Godot draws the result; it does not own the truth. That separation is what lets you
+    run the sim at 20&nbsp;Hz, render at 144, fast-forward a shift 8× on request, replay a seed exactly,
+    and — later — evaluate a build headlessly for balance passes.</p>
+
+  <table>
+    <thead><tr><th>Option</th><th>Verdict</th><th>Why / why not</th></tr></thead>
+    <tbody>
+      <tr><td>Godot 4.x</td><td>Recommended</td>
+        <td>Best 2D-per-unit-effort. Tilemaps, shaders, UI, particles, controller input, save/load all in the box.
+          GDScript is fast enough because the hot loop is a flat array walk, and if a late-game board with 2,000
+          items ever chokes you port just the tick function to GDExtension/C# without touching the rest.</td></tr>
+      <tr><td>TypeScript + PixiJS</td><td>Close second</td>
+        <td>This game is 80% UI, tooltips, numbers and a tick loop — all things the web is excellent at, and you already
+          have a bun toolchain. Ship a playable prototype in a URL, no installs, instant playtest feedback.
+          Loses on game feel (particles, screenshake, audio, controller) and on Steam being a chore.</td></tr>
+      <tr><td>Bevy (Rust)</td><td>Not for the first version</td>
+        <td>ECS is a genuinely good fit for tick-based factory sim and the perf ceiling is enormous. But the
+          churn tax and the UI story mean you'd spend your first month on menus. Consider it only if the design
+          proves out and you want a rewrite you'll enjoy.</td></tr>
+      <tr><td>Unity / Unreal</td><td>No</td>
+        <td>Overkill weight for a 2D grid game; you'd fight the engine's opinions more than you'd use them.</td></tr>
+      <tr><td>LÖVE (Lua)</td><td>No</td>
+        <td>Lovely and minimal, but you'd hand-roll the entire UI layer — and this game's UI is the game.</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout teal">
+    <span class="k">Pragmatic hybrid</span>
+    <p>If you want to know whether the design is <em>fun</em> before committing: prototype the tick sim and
+      board in TS/Pixi in a weekend, because the fun is entirely in the numbers and the routing, and none of
+      it is in the rendering. Then rebuild in Godot once the loop sings. The sim is ~600 lines and porting it
+      is mechanical.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 2 PILLARS ══════════════════════════ -->
+<section id="pillars">
+  <h2>2 · Design pillars</h2>
+  <div class="grid3">
+    <div class="card">
+      <h4 style="margin-top:0">Compounding, not adding</h4>
+      <p>A quota that doubles cannot be met by placing one more drill. It's met by finding a
+        <em>multiplier</em> — a loop, an aura, a relic — and then feeding it. The player should
+        physically feel the moment their factory stops being linear.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0">Space is the real currency</h4>
+      <p>Credits are easy. Tiles are not. Every synergy costs board area, and a loop that triples
+        item value eats twelve tiles you wanted for throughput. Every build is a bet on
+        <em>quality vs quantity</em>.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0">Legible spaghetti</h4>
+      <p>Factorio's joy is watching it work. Every item is a visible dot on a belt. The player should be
+        able to point at the one lane that is starving and fix it. No hidden math, no invisible state.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <span class="k">The one-sentence pitch</span>
+    <p><strong>Factorio's belts, Slay the Spire's structure, Balatro's escalation:</strong> you build a
+      tiny production line, run a 60-tick shift against a quota, and spend the surplus on machines and
+      relics that turn the line into something absurd by round twelve.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 3 BOARD ══════════════════════════ -->
+<section id="board">
+  <h2>3 · Anatomy of the board</h2>
+  <p>An <strong>8 × 6 grid</strong> in Act 1, expanding to <strong>12 × 9</strong> by the end of a run.
+    Every tile holds exactly one thing. Machines have a fixed footprint of 1 tile — no multi-tile buildings,
+    because the whole design leans on adjacency and multi-tile shapes make adjacency ambiguous.</p>
+
+  <figure>
+    <div class="board-frame"><div id="anatomy"></div></div>
+    <figcaption><b>Tile grammar.</b> Every machine occupies one tile and has a single <b>output edge</b> (the arrow).
+      Items leave through that edge into whatever sits on the far side. Machines with inputs simply accept anything
+      arriving on any other edge — there is no input-side configuration to get wrong. Belts move one tile per tick.
+      <b>Modifier</b> machines (teal) never touch items; they project an aura onto the four orthogonally adjacent
+      tiles, drawn as a dashed halo.</figcaption>
+  </figure>
+
+  <h4>Rules the whole game rests on</h4>
+  <ul>
+    <li><strong>One tile, one output edge.</strong> Rotation is the only placement decision — no belt-drawing mode,
+      no wire tool. Placement is fast enough to be a shop-tempo activity.</li>
+    <li><strong>A machine holds 1 item in and 1 item out.</strong> If the output tile is occupied, the machine
+      <em>jams</em> and stops consuming. Jams are visible (the tile pulses red) and are a primary skill expression.</li>
+    <li><strong>Items carry state.</strong> Type, and a <strong>quality</strong> integer 0–10. Final value is
+      <code>base_value × (1 + 0.25 × quality)</code>. Quality is where the exponential lives.</li>
+    <li><strong>A shift is 60 ticks.</strong> Fixed. Travel time is therefore a real cost — a vault twelve tiles
+      away throws away 20% of your shift on transit, which is why routing matters and not just machine count.</li>
+    <li><strong>Only what reaches a Vault counts.</strong> Items in flight at tick 60 are lost. Late-game builds
+      live or die on their drain time.</li>
+  </ul>
+</section>
+
+<!-- ══════════════════════════ 4 CHAIN ══════════════════════════ -->
+<section id="chain">
+  <h2>4 · The value chain</h2>
+  <p>Four tiers, each worth 4× the last. This 4× step is deliberately steeper than the effort to reach it,
+    so <em>refining deeper</em> always beats <em>extracting wider</em> — until board space or shift length
+    stops you, which is the whole tension.</p>
+
+  <figure>
+    <div class="board-frame"><div id="chainfig"></div></div>
+    <figcaption><b>Three raw lines converge upward.</b> Ore (kinetic) is cheap and fast; Sap (organic) is slower but
+      spawns pre-qualified; Crystal (precision) is slow and expensive but is the only route into Tier 3 precision goods.
+      Tier 4 needs two Tier 3 inputs from <b>different branches</b>, which is what forces a mature factory to run
+      parallel production lines instead of one fat one.</figcaption>
+  </figure>
+
+  <table>
+    <thead><tr><th>Tier</th><th>Items</th><th class="num">Base value</th><th>Made by</th></tr></thead>
+    <tbody>
+      <tr><td>T1 · Raw</td><td>Ore, Sap, Crystal</td><td class="num">1</td><td>Extractors (from nothing)</td></tr>
+      <tr><td>T2 · Refined</td><td>Ingot, Resin, Shard</td><td class="num">4</td><td>Processors (1 in → 1 out)</td></tr>
+      <tr><td>T3 · Component</td><td>Gear, Circuit, Lens</td><td class="num">16</td><td>Assemblers (2 in → 1 out)</td></tr>
+      <tr><td>T4 · Product</td><td>Engine, Core, Beacon</td><td class="num">64</td><td>Assemblers (2 × T3 in → 1 out)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout violet">
+    <span class="k">Why quality is the interesting axis</span>
+    <p>A Tier-4 Engine at quality 0 is worth 64. The same Engine at quality 10 is worth 224 — a 3.5× swing off
+      a stat that costs you tiles, not credits. So the endgame question is never "can I make Engines?" but
+      "how many polish passes can I afford between the assembler and the vault?" That's the decision the
+      whole game is built to keep asking.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 5 MACHINES ══════════════════════════ -->
+<section id="machines">
+  <h2>5 · The machine catalogue</h2>
+  <p>Roughly 30 machines across five categories. Below is the Act-1-and-beyond core; the rest are rarer
+    variants and boss drops. <em>Cost is in credits; tags drive synergy.</em></p>
+
+  <h4>Extractors — the only source of new items</h4>
+  <div class="grid3" id="cat-extractor"></div>
+
+  <h4>Processors — one in, one out, one tier up</h4>
+  <div class="grid3" id="cat-processor"></div>
+
+  <h4>Assemblers — two in, one out, big tier jump</h4>
+  <div class="grid3" id="cat-assembler"></div>
+
+  <h4>Logistics — no transformation, all routing</h4>
+  <div class="grid3" id="cat-logistics"></div>
+
+  <h4>Modifiers — the multipliers</h4>
+  <div class="grid3" id="cat-modifier"></div>
+</section>
+
+<!-- ══════════════════════════ 6 SYNERGY ══════════════════════════ -->
+<section id="synergy">
+  <h2>6 · Synergies — where the crazy comes from</h2>
+  <p>Three independent synergy systems, deliberately pulling in different directions so that no single
+    build is optimal:</p>
+
+  <div class="grid3">
+    <div class="card">
+      <h4 style="margin-top:0"><span style="color:var(--modifier)">A ·</span> Adjacency auras</h4>
+      <p>Modifiers buff the four orthogonal neighbours. Auras want machines <em>clustered</em>.
+        But a production chain is inherently a <em>line</em>. Every aura you take makes your factory
+        fold in on itself, and folded factories are where jams live.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0"><span style="color:var(--extractor)">B ·</span> Tag resonance</h4>
+      <p>Five tags — HEAT, KINETIC, VOLT, PRECISION, ORGANIC. Relics key off them
+        ("every HEAT machine touching another HEAT machine: +20% speed"). Tags reward
+        <em>committing</em> to a colour of factory, and audits punish you for it.</p>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0"><span style="color:var(--assembler)">C ·</span> Loops &amp; quality</h4>
+      <p>The deep one. Belts can form closed circuits. Put polishers on the ring and a filter as the exit
+        gate, and items <em>circulate</em>, gaining quality each lap until they qualify to leave.
+        Add a Duplicator and the item <em>count</em> grows too.</p>
+    </div>
+  </div>
+
+  <h3>The three signature engines</h3>
+
+  <figure>
+    <div class="board-frame"><div id="synHeat"></div></div>
+    <figcaption><b>1 · Heat Cascade.</b> A Heat Sink at the centre with Furnaces on all four sides: every furnace is
+      jam-immune and adds +1 quality to its output. Drop an Overclocker so its aura overlaps two of the furnaces and
+      they run at 0.75× cycle time. Cheap, compact, and the standard Act-1 answer. <b>Weakness:</b> it produces only
+      Tier 2 — it scales throughput, not value, so it stops carrying you around round 6.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="board-frame"><div id="synLoop"></div></div>
+    <figcaption><b>2 · The Polish Loop.</b> A closed belt ring with three Polishers on it and a Filter as the gate.
+      An item entering at quality 1 laps the ring gaining +3 per lap; the Filter is set to <code>quality ≥ 9</code>
+      and ejects west to the Vault, passing everything else back around. Three laps ≈ 21 ticks of transit for a
+      3.25× value multiplier. <b>Weakness:</b> twelve tiles of board and it multiplies value <em>per item</em>,
+      so it's worthless until your throughput is already good — and it will happily eat your entire shift if
+      you gate it too high.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="board-frame"><div id="synDup"></div></div>
+    <figcaption><b>3 · Duplication Spiral (the run-winner).</b> Put a Duplicator <em>inside</em> the polish loop.
+      Every lap, 15% of circulating items clone. Item count grows geometrically while quality climbs — the loop is
+      both a multiplier and a reactor. <b>Weakness:</b> it is genuinely unstable. Clone faster than the Filter drains
+      and the ring saturates, every belt jams, and your entire factory backs up to the drills and produces
+      <em>nothing</em>. Taming it — usually with a second gate or a Buffer bleed valve — is the most satisfying
+      problem in the game.</figcaption>
+  </figure>
+
+  <h3>Relics — the roguelite layer</h3>
+  <p>Passive, permanent for the run, one board-independent effect each. Awarded by audits and bought from the
+    shop's relic slot. These are where run identity comes from.</p>
+  <table>
+    <thead><tr><th>Relic</th><th>Effect</th><th>Build it enables</th></tr></thead>
+    <tbody>
+      <tr><td>Union Contract</td><td>Machines with 2+ same-tag orthogonal neighbours run 15% faster.</td><td>Mono-tag blob factories</td></tr>
+      <tr><td>Vertical Integration</td><td>Payout ×1.25 for each distinct <em>tier</em> delivered this shift (all four = ×2.44).</td><td>Wide, shallow, many parallel lines</td></tr>
+      <tr><td>Overengineered</td><td>Quality cap 10 → 20.</td><td>Loops. Doubles the ceiling of engine #2 and #3.</td></tr>
+      <tr><td>Just-In-Time</td><td>Items delivered in the final 10 ticks are worth ×2.</td><td>Buffer-and-dump: hoard all shift, flush at tick 50</td></tr>
+      <tr><td>Redundancy</td><td>The first jam each shift is ignored and refunds 5 credits.</td><td>Deliberately over-saturated duplication spirals</td></tr>
+      <tr><td>Scrap Heap</td><td>Selling refunds 100% and grants a reroll.</td><td>Total rebuilds every act — a "fluid" playstyle</td></tr>
+      <tr><td>Critical Path</td><td>The longest belt run on the board grants +1 quality at its end.</td><td>Deliberately sprawling, slow, high-value lines</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ══════════════════════════ 7 PHASES ══════════════════════════ -->
+<section id="phases">
+  <h2>7 · The six phases of a round</h2>
+  <p>Every round is the same six beats. Phases 1–3 are untimed and deliberate; phase 4 is the payoff you
+    watch; 5–6 are the dopamine. Total round length: 2–5 minutes, growing across the run.</p>
+
+  <figure>
+    <div class="board-frame"><div id="phaseflow"></div></div>
+    <figcaption><b>The round loop.</b> Twelve laps of this per run, split into three acts of three rounds plus an
+      Audit. Only phase 4 has a clock.</figcaption>
+  </figure>
+
+  <div id="phasecards"></div>
+</section>
+
+<!-- ══════════════════════════ 8 WALKTHROUGH ══════════════════════════ -->
+<section id="walkthrough">
+  <h2>8 · Full walkthrough — one complete run</h2>
+  <p class="lead">Corporation: <strong>Ferrous Dynamics</strong> — starts with an extra Drill and the relic
+    <em>Union Contract</em>. Seed <code>0xC0FFEE</code>. Here is the whole run, board by board.</p>
+
+  <div class="callout teal">
+    <span class="k">Which of these numbers are real</span>
+    <p>The <strong>round 1 and round 4 boards are executable</strong> — they exist as data in
+      <code>sim/src/boards.ts</code> and the reference simulation reproduces every figure quoted below
+      (52 credits from 13 ingots with the first landing on tick 12; 240 credits from 10 quality-2 gears).
+      Run <code>bun test</code> in <code>sim/</code> to check. Rounds 7 and 11 are <em>hand-estimated</em>:
+      they use mechanics the reference sim doesn't implement yet (Filter gates, Splitters, Duplicator
+      economics), so treat their payouts as design targets rather than measurements.</p>
+  </div>
+
+  <!-- ROUND 1 -->
+  <div class="step">
+    <p class="rnd">Act I · Round 1 · Quota 20</p>
+    <h3>The first line</h3>
+    <p>You start with 10 credits and a bare 8×6 board with one Vault already bolted to the east edge.
+      The shop offers a Drill (3), a Furnace (5) and a Splitter (4). You buy the Drill and the Furnace,
+      leaving 2 credits, and spend nothing on belts — belts are 1 credit each and you need six.
+      You are 4 credits short, so you skip the last belt and put the Furnace one tile closer.</p>
+    <div class="board-frame"><div id="wt1"></div></div>
+    <div class="stats">
+      <div class="stat"><div class="l">Ore / shift</div><div class="v">15</div></div>
+      <div class="stat"><div class="l">Delivered</div><div class="v">13 ingots</div></div>
+      <div class="stat"><div class="l">Payout</div><div class="v good">52</div></div>
+      <div class="stat"><div class="l">Quota</div><div class="v">20</div></div>
+    </div>
+    <p>The Drill spits an Ore every 4 ticks — 15 per shift. The Furnace takes 3 ticks per Ingot, so it never
+      becomes the bottleneck; the drill is. Transit costs 7 ticks, so two ingots are still on the belt at tick 60
+      and are lost. <strong>13 × 4 = 52 credits.</strong> Quota cleared by 32.</p>
+    <p><em>The lesson the round teaches:</em> the bottleneck is upstream, and the last two items didn't make it.
+      Both facts will matter for the next eleven rounds.</p>
+  </div>
+
+  <!-- ROUND 2-3 -->
+  <div class="step">
+    <p class="rnd">Act I · Rounds 2–3 · Quota 45 → 90</p>
+    <h3>Doubling the line, then discovering auras</h3>
+    <p>Round 2 is the easy one: buy a second Drill and Furnace, run a parallel lane, merge before the vault.
+      96 delivered against a 45 quota. This is the last round that pure duplication works.</p>
+    <p>Round 3's shop offers an <strong>Overclocker</strong> for 10 and a <strong>Heat Sink</strong> for 9.
+      You can afford one. You take the Heat Sink, place it between the two Furnaces, and discover the game:
+      both furnaces are now jam-proof <em>and</em> their ingots come out at quality 1 — every ingot is worth 5
+      instead of 4, for free, forever. 178 delivered against 90.</p>
+    <div class="callout">
+      <span class="k">The teaching moment</span>
+      <p>+1 quality on a Tier-2 item is +25% value. On a Tier-4 item it's the same +25% — but of 64 instead of 4.
+        The player who notices this in Act 1 is the player who builds a polish loop in Act 2. Nothing in the UI
+        says it out loud; the tooltip just shows the arithmetic and lets them find it.</p>
+    </div>
+  </div>
+
+  <!-- ROUND 4 AUDIT -->
+  <div class="step audit">
+    <p class="rnd">Act I · Round 4 · <span style="color:var(--processor)">AUDIT</span> · Quota 200</p>
+    <h3>Efficiency Audit — the first wall</h3>
+    <p>Audit modifier: <em>quota ×2, but the board gains two columns.</em> 200 credits needed and your
+      current line does 178. You have 140 banked. This is the round where you must stop widening and start
+      <strong>going up a tier</strong>.</p>
+    <p>You buy a <strong>Fabricator</strong> (12) — two Ingots in, one Gear out — and an
+      <strong>Overclocker</strong> (10), and rebuild:</p>
+    <div class="board-frame"><div id="wt4"></div></div>
+    <div class="stats">
+      <div class="stat"><div class="l">Ingots / shift</div><div class="v">28</div></div>
+      <div class="stat"><div class="l">Gears out</div><div class="v">10</div></div>
+      <div class="stat"><div class="l">Quality</div><div class="v">2</div></div>
+      <div class="stat"><div class="l">Payout</div><div class="v good">240</div></div>
+      <div class="stat"><div class="l">Quota</div><div class="v bad">200</div></div>
+    </div>
+    <p>Two drills feed two furnaces through the round-3 Heat Sink, and both lanes corner inward into a
+      Merger that feeds the Fabricator. The interesting decision is <strong>where the Overclocker goes</strong>.
+      The obvious answer is on the furnaces — and it's wrong. Two drills supply 0.5 ore/tick; two furnaces can
+      already process 0.67/tick; but the Fabricator only consumes 0.4 ingot/tick. The assembler is the
+      bottleneck, so speeding the furnaces achieves literally nothing. On the Fabricator, the same aura cuts
+      its cycle from 5 ticks to 3.75 and lifts demand to 0.53 ingot/tick — past supply, which is exactly where
+      you want a bottleneck to sit.</p>
+    <p>A Polisher takes the last tile before the Vault. Each Gear leaves at quality 2 — the Heat Sink gave 1,
+      the Polisher the other — so it's worth <code>16 × 1.5 = 24</code>. Ten of them land:
+      <strong>240</strong>.</p>
+    <p>Cleared by 40 credits, with 9 items still stranded on belts at tick 60. That margin is the point — Act 1
+      should end with the player <em>sweating</em>, not coasting.</p>
+    <p><strong>Audit reward:</strong> choose one of three relics. You take <em>Overengineered</em>
+      (quality cap 10 → 20) because you have started to suspect what quality does.</p>
+  </div>
+
+  <!-- ROUND 5-7 -->
+  <div class="step">
+    <p class="rnd">Act II · Rounds 5–7 · Quota 400 → 700 → 1,200</p>
+    <h3>The loop goes in</h3>
+    <p>Act II opens the board to 10×8 and unlocks the Crystal branch, the <strong>Filter</strong>, and the
+      <strong>Duplicator</strong>. Round 5 you add a third drill lane and a second Heat Sink — brute force,
+      520 delivered, comfortable. Round 6 the shop rolls a Filter and two Polishers and you commit.</p>
+    <p>Round 7's board is the first one that looks like a <em>factory</em>:</p>
+    <div class="board-frame"><div id="wt7"></div></div>
+    <div class="stats">
+      <div class="stat"><div class="l">Gears / shift</div><div class="v">22</div></div>
+      <div class="stat"><div class="l">Exit quality</div><div class="v">9</div></div>
+      <div class="stat"><div class="l">Value / gear</div><div class="v">52</div></div>
+      <div class="stat"><div class="l">Delivered</div><div class="v">30 items</div></div>
+      <div class="stat"><div class="l">Payout</div><div class="v good">1,580</div></div>
+    </div>
+    <p>Three drill→furnace lanes, two Heat Sinks stacked so each covers two furnaces, everything merging into
+      one Fabricator under an Overclocker. Gears then feed the <strong>polish ring</strong> in the bottom
+      right: three Polishers on the loop, a Duplicator on the east side, and the Filter at the west gate set
+      to <code>quality ≥ 9</code>. Gears enter at quality 2, lap the ring 2–3 times, and exit at 9 — worth
+      <code>16 × 3.25 = 52</code> each. The Duplicator adds roughly a third more items than went in.</p>
+    <div class="callout violet">
+      <span class="k">What just happened structurally</span>
+      <p>Throughput went up 40% between rounds 6 and 7. <em>Payout</em> went up 74%. The player has crossed
+        from adding to compounding, and every subsequent decision is about feeding the ring rather than
+        building new lines. That crossover is the entire emotional arc of the game, and it should happen
+        somewhere in rounds 6–8 for almost every run.</p>
+    </div>
+  </div>
+
+  <!-- ROUND 8 AUDIT -->
+  <div class="step audit">
+    <p class="rnd">Act II · Round 8 · <span style="color:var(--processor)">AUDIT</span> · Quota 2,400</p>
+    <h3>Blackout — the audit that hates your build</h3>
+    <p>Audit modifier: <em>all VOLT machines are disabled for the shift.</em> Your Overclocker is VOLT. So is
+      your Duplicator. The ring still polishes but no longer clones, and the Fabricator drops back to base speed.
+      Naive throughput falls to roughly 1,900 — a fail.</p>
+    <p>The out: you have 900 banked. You sell the dead Duplicator back (Scrap Heap would have refunded full;
+      you get half, 10 credits, and a free tile) and spend on a fourth drill lane and a second Vault placed
+      <em>next to the filter</em>, cutting six tiles of transit off every delivery. Six tiles is 10% of the shift.</p>
+    <div class="stats">
+      <div class="stat"><div class="l">Transit saved</div><div class="v">6 ticks</div></div>
+      <div class="stat"><div class="l">Extra deliveries</div><div class="v">+7</div></div>
+      <div class="stat"><div class="l">Payout</div><div class="v good">2,760</div></div>
+      <div class="stat"><div class="l">Quota</div><div class="v bad">2,400</div></div>
+    </div>
+    <p>Cleared by 360. <strong>Audits are the game's teaching mechanism:</strong> each one invalidates a
+      different axis of your build and forces you to find value on an axis you'd been ignoring. Blackout
+      teaches you that <em>latency is a resource</em>.</p>
+    <p><strong>Reward:</strong> <em>Vertical Integration</em> — payout ×1.25 per distinct tier delivered.
+      You now have a reason to keep a cheap raw-ore line running straight to a vault, which you would
+      otherwise have torn out. Good relics change what "waste" means.</p>
+  </div>
+
+  <!-- ROUND 9-11 -->
+  <div class="step">
+    <p class="rnd">Act III · Rounds 9–11 · Quota 4,500 → 8,000 → 14,000</p>
+    <h3>Tier 4 and the second branch</h3>
+    <p>The board opens to 12×9. Quotas now demand <strong>Engines</strong>, which need a Gear <em>and</em>
+      a Circuit — and Circuits need Shards, which means standing up an entire second raw branch from
+      Geode Crackers through Lapidaries. Half of Act III is logistics work: getting two independent
+      production lines to arrive at one assembler in sync.</p>
+    <p>Round 11's board, the mature factory:</p>
+    <div class="board-frame"><div id="wt11"></div></div>
+    <div class="stats">
+      <div class="stat"><div class="l">Engines / shift</div><div class="v">18</div></div>
+      <div class="stat"><div class="l">Exit quality</div><div class="v">17</div></div>
+      <div class="stat"><div class="l">Value / engine</div><div class="v">336</div></div>
+      <div class="stat"><div class="l">Tier bonus</div><div class="v">×2.44</div></div>
+      <div class="stat"><div class="l">Payout</div><div class="v good">19,500</div></div>
+    </div>
+    <p>Reading the board north to south: the ore branch runs two drill→furnace lanes through a Heat Sink into
+      a Splitter, which feeds ingots <em>both</em> east to the Fabricator (Gears) and south to the Circuit
+      Bench. The crystal branch comes in from the west through a Lapidary and merges into the same
+      Circuit Bench lane. Gears and Circuits both corner into <strong>Engine Works</strong> under an
+      Overclocker. Engines drop south into the big polish ring — three Polishers plus a Duplicator, gated at
+      <code>quality ≥ 17</code> thanks to <em>Overengineered</em> — and exit west into the main Vault.</p>
+    <p>Meanwhile the little Compressor line at the bottom left takes four raw Ore and squashes them into an
+      Ingot, delivering to a second Vault. It's economically terrible — about 200 credits a shift — but it
+      puts a second tier on the board, and <em>Vertical Integration</em> turns that 200 into a ×1.25 on
+      everything. The player kept a bad line for a good reason. That is the kind of decision the design exists
+      to produce.</p>
+    <div class="callout teal">
+      <span class="k">The failure state that makes this fun</span>
+      <p>On the first attempt at this board the ring saturated: the Duplicator cloned faster than the Filter
+        could drain, the ring filled, the Engine Works jammed, then the Fabricator, then both furnaces, and the
+        shift ended with 4 engines delivered and forty items sitting motionless on belts. The fix was a
+        <strong>Buffer</strong> spliced into the ring as a bleed valve. Fixing it yourself, in the build phase,
+        watching the sim preview, is the best ten minutes in the game.</p>
+    </div>
+  </div>
+
+  <!-- ROUND 12 -->
+  <div class="step audit">
+    <p class="rnd">Act III · Round 12 · <span style="color:var(--processor)">FINAL AUDIT</span> · Quota 30,000</p>
+    <h3>Rush Order — 30 ticks</h3>
+    <p>The final audit halves the shift. Thirty ticks. Your ring needs 21 ticks just to bring an engine to
+      quality 17, and your first engine doesn't exist until tick 14. Under the old build you deliver
+      <em>three engines</em> and lose the run.</p>
+    <p>What actually wins it: you drop the Filter gate from 17 to <strong>9</strong>, halving lap count.
+      Engines exit at 208 instead of 336 — a 38% value cut — but you deliver 26 of them instead of 3.
+      You also move the Vault directly against the Filter's exit edge, and you spend your entire 4,000-credit
+      bank on two more drill lanes that only exist to keep the ring saturated for thirty ticks.</p>
+    <div class="stats">
+      <div class="stat"><div class="l">Shift</div><div class="v bad">30 ticks</div></div>
+      <div class="stat"><div class="l">Engines</div><div class="v">26</div></div>
+      <div class="stat"><div class="l">Value / engine</div><div class="v">208</div></div>
+      <div class="stat"><div class="l">Tier bonus</div><div class="v">×2.44</div></div>
+      <div class="stat"><div class="l">Payout</div><div class="v good">34,100</div></div>
+      <div class="stat"><div class="l">Quota</div><div class="v bad">30,000</div></div>
+    </div>
+    <p><strong>Run complete. 34,100 against 30,000 — cleared by 13.7%.</strong> The winning move was
+      voluntarily making every item worse. That's the design working: the ceiling is never one build,
+      it's the willingness to retune the build you love when the constraint changes.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════ 9 CURVE ══════════════════════════ -->
+<section id="curve">
+  <h2>9 · The escalation curve</h2>
+  <p>The tuning target: the quota should sit just under what a <em>well-played</em> board can deliver, and
+    audits should sit close enough to feel survivable rather than certain. Notice the gap narrows at
+    every audit and re-opens after it — that sawtooth is the run's heartbeat.</p>
+
+  <div class="chart-card" style="position:relative">
+    <p class="chart-title">Delivered value vs quota, one full run</p>
+    <p class="chart-sub">Credits per shift · log scale · orange bands are audit rounds</p>
+    <div class="chart-legend">
+      <span><i style="background:var(--series-1)"></i>Delivered</span>
+      <span><i style="background:var(--series-2)"></i>Quota</span>
+    </div>
+    <div id="curvechart"></div>
+    <div id="tip"></div>
+    <button class="tbl-toggle" id="tblBtn" aria-expanded="false" aria-controls="curveTable">Show data table</button>
+    <div id="curveTable" hidden></div>
+  </div>
+
+  <h4>Why a 1.8× quota step</h4>
+  <p>Each round's quota is roughly <code>1.8×</code> the last, with audits jumping <code>2.2×</code>.
+    Linear factory growth (add a lane) yields about <code>1.3×</code>. Tier growth (go up a tier) yields
+    <code>2.5×</code> but costs a whole build phase. Quality growth (add a polish pass) yields <code>1.25×</code>
+    and stacks multiplicatively with both. The 1.8× step is chosen precisely so that <strong>no single
+    growth axis keeps up</strong> — you must alternate between them, and that alternation is the round-to-round
+    decision the game is made of.</p>
+</section>
+
+<!-- ══════════════════════════ 10 META ══════════════════════════ -->
+<section id="meta">
+  <h2>10 · Meta-progression</h2>
+  <div class="grid2">
+    <div class="card">
+      <h4 style="margin-top:0">Corporations (characters)</h4>
+      <p>Six unlockable starts, each a starting relic plus a rule change.</p>
+      <ul style="font-size:14px">
+        <li><strong>Ferrous Dynamics</strong> — extra Drill, <em>Union Contract</em>. The tutorial corp.</li>
+        <li><strong>Verdant Cooperative</strong> — Sap only; no Ore extractors exist in your shop at all.</li>
+        <li><strong>Precision Guild</strong> — start at Tier 3; quota starts at round 5's value.</li>
+        <li><strong>Salvage &amp; Sons</strong> — start with 9 random machines and 0 credits. Build with what you're given.</li>
+        <li><strong>Continuous Ltd.</strong> — the board never resets between rounds and machines cannot be sold.</li>
+        <li><strong>The Bureau</strong> — every round is an audit. Every one.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4 style="margin-top:0">Debt levels (ascension)</h4>
+      <p>Twelve escalating difficulty tiers per corporation, applied in fixed order so the community
+        shares a ladder:</p>
+      <ol style="font-size:14px">
+        <li>Quotas +15%</li>
+        <li>Shop offers 2 instead of 3</li>
+        <li>Shift 60 → 55 ticks</li>
+        <li>Audits appear every 3rd round instead of 4th</li>
+        <li>Board starts one column smaller</li>
+        <li>Machines cost +25% after round 6</li>
+        <li>Quality cap 10 → 8</li>
+        <li>Two audit modifiers stack</li>
+        <li>Rerolls cost credits</li>
+        <li>Jams are permanent for the shift</li>
+        <li>Quota step 1.8× → 2.0×</li>
+        <li>Vaults must be re-purchased each act</li>
+      </ol>
+    </div>
+  </div>
+  <h4>Unlocks</h4>
+  <p>Machines and relics unlock by <em>usage milestones</em>, not by wins — "deliver a quality-15 item",
+    "run a loop of 16+ tiles", "clear a shift with zero jams". This keeps a losing run productive and
+    teaches mechanics by naming them as goals.</p>
+</section>
+
+<!-- ══════════════════════════ 11 BUILD ══════════════════════════ -->
+<section id="build">
+  <h2>11 · Build plan</h2>
+  <h3>Architecture</h3>
+  <p>Three layers, strictly separated. The top layer must be deletable without the bottom two noticing.</p>
+  <table>
+    <thead><tr><th>Layer</th><th>Contents</th><th>Rule</th></tr></thead>
+    <tbody>
+      <tr><td>Sim</td><td><code>Board</code> (2D array of <code>Machine</code>), <code>Item</code> structs,
+        <code>tick()</code>, seeded <code>RandomNumberGenerator</code></td>
+        <td>Pure data. No <code>Node</code>, no <code>get_node</code>, no delta time. Runs headless in a test.</td></tr>
+      <tr><td>Data</td><td><code>MachineDef</code>, <code>RelicDef</code>, <code>AuditDef</code> as
+        <code>Resource</code> (.tres) or JSON</td>
+        <td>Every number lives here. Zero balance constants in code. Hot-reloadable.</td></tr>
+      <tr><td>View</td><td>TileMapLayer floor · one Node2D per machine · one
+        <code>MultiMeshInstance2D</code> for <em>all</em> items · Control-based UI</td>
+        <td>Reads sim state, interpolates between ticks, writes nothing back.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Tick rate:</strong> sim at 20 Hz, decoupled from frames. Items lerp between their previous and
+    current tile for smooth motion. Speed control (1× / 2× / 4× / instant) is just how many sim ticks you
+    run per frame — free, because the sim doesn't know about time.</p>
+  <p><strong>Item rendering:</strong> a late-game board has 300–2,000 items in flight. One
+    <code>MultiMeshInstance2D</code> with per-instance colour draws all of them in a single call. Never
+    a scene node per item — that's the one decision that will bite you at round 11 if you get it wrong.</p>
+
+  <h3>Milestones</h3>
+  <table>
+    <thead><tr><th>#</th><th>Milestone</th><th>Done when</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>Tick sim, no rendering</td><td>A unit test builds drill→belt→furnace→vault and asserts 13 ingots at tick 60.</td></tr>
+      <tr><td>2</td><td>Board renders + items move</td><td>You can watch the round-1 board run and it looks right.</td></tr>
+      <tr><td>3</td><td>Placement UI</td><td>Buy, place, rotate, sell. Ghost preview, invalid tiles flagged.</td></tr>
+      <tr><td>4</td><td>Full round loop</td><td>All six phases, quota, payout, one shop, game over. <em>This is your first playtest.</em></td></tr>
+      <tr><td>5</td><td>Loops &amp; quality</td><td>Filter, Polisher, Duplicator. Closed belt circuits resolve without infinite loops in one tick.</td></tr>
+      <tr><td>6</td><td>Content pass</td><td>30 machines, 20 relics, 10 audits, all as data files.</td></tr>
+      <tr><td>7</td><td>Feel</td><td>Jam pulses, delivery pops, payout counter, audio. The difference between a prototype and a game.</td></tr>
+      <tr><td>8</td><td>Meta</td><td>Corporations, debt levels, unlocks, save/load, run history.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The one hard technical problem</h3>
+  <p>Resolving a tick when items move into tiles other items are simultaneously leaving. Solve it by
+    <strong>iterating the board in reverse flow order</strong> — compute a topological order of machines
+    by output direction once at build time, then move downstream tiles first so each vacates before its
+    upstream neighbour fills it. Closed loops have no topological order, so detect cycles at build time and
+    resolve each cycle with a two-pass "claim then commit": every item claims its target, conflicts resolve
+    by a stable tile index, then all uncontested moves commit at once. Deterministic, order-independent, and
+    it makes belt loops behave exactly like straight belts — which is what lets the polish loop exist at all.</p>
+</section>
+
+<footer>
+  OVERFLOW · design document v0.1 · all numbers are first-pass targets and expect to move ±40% on contact with playtesting.
+</footer>
+
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════
+   Grid renderer — every board diagram in this document is built
+   from a cell list by this one function.
+   ═══════════════════════════════════════════════════════════════ */
+const NS = 'http://www.w3.org/2000/svg';
+const C = {
+  extractor:'#f0a63a', processor:'#e8623c', assembler:'#8b7bf0',
+  modifier:'#34c8b0', logistics:'#647890', vault:'#6fcf5f',
+  tile:'#1b222c', tileEdge:'#262f3b', belt:'#3a4655', item:'#e8eef6'
+};
+
+const DEFS = {
+  drill:    {k:'extractor', s:'DRL', n:'Drill',         cost:3,  tags:['KINETIC'],            d:'Ore every 4 ticks, from nothing. The cheapest throughput in the game and the bottleneck in every Act-1 build.'},
+  tap:      {k:'extractor', s:'TAP', n:'Sap Tap',       cost:4,  tags:['ORGANIC'],            d:'Sap every 6 ticks, spawned at quality 1. Slower than a Drill but its output is born pre-polished.'},
+  geode:    {k:'extractor', s:'GEO', n:'Geode Cracker', cost:8,  tags:['PRECISION'],          d:'Crystal every 10 ticks. Painfully slow, and the only entrance to the precision half of the tech tree.'},
+
+  furnace:  {k:'processor', s:'FUR', n:'Furnace',       cost:5,  tags:['HEAT','KINETIC'],     d:'Ore → Ingot in 3 ticks. Jams loudly if its output tile is blocked, which is how you learn about jamming.'},
+  retort:   {k:'processor', s:'RET', n:'Retort',        cost:5,  tags:['HEAT','ORGANIC'],     d:'Sap → Resin in 3 ticks. Preserves incoming quality, so it pairs naturally with the Sap Tap.'},
+  lapidary: {k:'processor', s:'LAP', n:'Lapidary',      cost:9,  tags:['PRECISION'],          d:'Crystal → Shard in 5 ticks. Slow, expensive, mandatory for Tier 4.'},
+  compress: {k:'processor', s:'CMP', n:'Compressor',    cost:14, tags:['KINETIC'],            d:'Four identical items in → one item of the next tier out. Skips a whole processing step at 4× the input cost.'},
+
+  fab:      {k:'assembler', s:'FAB', n:'Fabricator',    cost:12, tags:['KINETIC','VOLT'],     d:'Ingot + Ingot → Gear in 5 ticks. The first 4× value jump and the moment factories start branching.'},
+  circuit:  {k:'assembler', s:'CIR', n:'Circuit Bench', cost:16, tags:['VOLT','PRECISION'],   d:'Ingot + Shard → Circuit in 6 ticks. Needs two different raw branches, so it forces layout complexity.'},
+  lens:     {k:'assembler', s:'LNS', n:'Lens Grinder',  cost:16, tags:['PRECISION'],          d:'Shard + Resin → Lens in 6 ticks. The organic route into Tier 3, and it carries quality through.'},
+  engine:   {k:'assembler', s:'ENG', n:'Engine Works',  cost:30, tags:['KINETIC','VOLT'],     d:'Gear + Circuit → Engine in 8 ticks. Base value 64. Everything in Act III exists to feed this tile.'},
+
+  belt:     {k:'logistics', s:'',    n:'Belt',          cost:1,  tags:[],                     d:'One tile per tick, one item per tile. Corners freely. Belts forming a closed circuit are legal — that is the whole endgame.'},
+  splitter: {k:'logistics', s:'SPL', n:'Splitter',      cost:4,  tags:[],                     d:'Round-robins its input across up to three output edges. Feeds two assemblers from one lane.'},
+  merger:   {k:'logistics', s:'MRG', n:'Merger',        cost:4,  tags:[],                     d:'Accepts from up to three edges, emits on one. Fair-queues so no input lane starves.'},
+  filter:   {k:'logistics', s:'FIL', n:'Filter',        cost:6,  tags:[],                     d:'Matching items eject to the side; everything else passes straight through. Match on item type or on quality threshold — the gate that makes polish loops possible.'},
+  buffer:   {k:'logistics', s:'BUF', n:'Buffer',        cost:6,  tags:[],                     d:'Holds 8 items and releases one per tick. A shock absorber for bursty lines and the standard fix for a saturated loop.'},
+  under:    {k:'logistics', s:'UND', n:'Underpass',     cost:5,  tags:[],                     d:'Tunnels beneath up to 3 tiles. The only way to cross two lanes without a merger.'},
+
+  overclock:{k:'modifier',  s:'OCK', n:'Overclocker',   cost:10, tags:['VOLT'],               d:'Orthogonally adjacent machines run at 0.75× cycle time. Auras stack multiplicatively, which gets silly fast.'},
+  polisher: {k:'modifier',  s:'POL', n:'Polisher',      cost:8,  tags:['PRECISION'],          d:'Items passing through gain +1 quality. Sits inline on a belt, so it costs a tile of transit — the core loop component.'},
+  heatsink: {k:'modifier',  s:'HSK', n:'Heat Sink',     cost:9,  tags:['HEAT'],               d:'Adjacent HEAT machines cannot jam and add +1 quality to their output. Turns a liability tag into a build.'},
+  dup:      {k:'modifier',  s:'DUP', n:'Duplicator',    cost:20, tags:['VOLT'],               d:'15% chance to clone an item passing through. Inside a loop this is exponential and genuinely dangerous.'},
+
+  vault:    {k:'vault',     s:'VLT', n:'Vault',         cost:0,  tags:[],                     d:'Scores whatever arrives, instantly. Distance from your production to your vault is dead shift time — place it late, place it close.'}
+};
+
+const DIRV = {N:[0,-1], S:[0,1], E:[1,0], W:[-1,0]};
+const OPP  = {N:'S', S:'N', E:'W', W:'E'};
+
+function el(tag, attrs){const n=document.createElementNS(NS,tag);for(const k in attrs)n.setAttribute(k,attrs[k]);return n;}
+
+function renderGrid(mount, cfg){
+  const T = cfg.tile || 54, pad = 14;
+  const W = cfg.w*T + pad*2, H = cfg.h*T + pad*2;
+  const svg = el('svg',{viewBox:`0 0 ${W} ${H}`, width:W, height:H, role:'img',
+                        'aria-label':cfg.alt||'factory board diagram'});
+  svg.style.maxWidth='100%'; svg.style.height='auto'; svg.style.display='block';
+
+  // floor
+  for(let y=0;y<cfg.h;y++) for(let x=0;x<cfg.w;x++){
+    svg.appendChild(el('rect',{x:pad+x*T+1.5, y:pad+y*T+1.5, width:T-3, height:T-3, rx:5,
+      fill:C.tile, stroke:C.tileEdge, 'stroke-width':1}));
+  }
+
+  const cx=(x)=>pad+x*T+T/2, cy=(y)=>pad+y*T+T/2;
+  const cells = cfg.cells||[];
+  const at = {}; cells.forEach(c=>at[c.x+','+c.y]=c);
+
+  // auras (drawn under machines)
+  cells.forEach(c=>{
+    if(!c.aura) return;
+    for(const d in DIRV){
+      const [dx,dy]=DIRV[d], nx=c.x+dx, ny=c.y+dy;
+      if(nx<0||ny<0||nx>=cfg.w||ny>=cfg.h) continue;
+      if(!at[nx+','+ny]) continue;
+      svg.appendChild(el('rect',{x:pad+nx*T+3, y:pad+ny*T+3, width:T-6, height:T-6, rx:6,
+        fill:'none', stroke:C.modifier, 'stroke-width':1.5, 'stroke-dasharray':'4 3', opacity:.75}));
+    }
+  });
+
+  // belt marker helper
+  function beltPath(c){
+    const g = el('g',{});
+    const inD = c.i || OPP[c.d];
+    const [ox,oy]=DIRV[c.d], [ix,iy]=DIRV[inD];
+    const sx=cx(c.x)+ix*(T/2-3), sy=cy(c.y)+iy*(T/2-3);
+    const ex=cx(c.x)+ox*(T/2-3), ey=cy(c.y)+oy*(T/2-3);
+    const d = `M ${sx} ${sy} L ${cx(c.x)} ${cy(c.y)} L ${ex} ${ey}`;
+    g.appendChild(el('path',{d, fill:'none', stroke:C.belt, 'stroke-width':9,
+      'stroke-linecap':'round', 'stroke-linejoin':'round'}));
+    // arrow head
+    const ax=cx(c.x)+ox*(T/2-9), ay=cy(c.y)+oy*(T/2-9);
+    const px=-oy, py=ox;
+    g.appendChild(el('path',{
+      d:`M ${ax+ox*6} ${ay+oy*6} L ${ax-ox*3+px*4.5} ${ay-oy*3+py*4.5} L ${ax-ox*3-px*4.5} ${ay-oy*3-py*4.5} Z`,
+      fill:'#8ea1b8'}));
+    if(c.item){
+      g.appendChild(el('circle',{cx:cx(c.x), cy:cy(c.y), r:4.5, fill:c.item, stroke:C.tile, 'stroke-width':2}));
+    }
+    return g;
+  }
+
+  cells.forEach(c=>{
+    const def = DEFS[c.t];
+    if(!def) return;
+    if(c.t==='belt'){ svg.appendChild(beltPath(c)); return; }
+
+    const col = C[def.k];
+    const g = el('g',{});
+    g.appendChild(el('rect',{x:pad+c.x*T+4, y:pad+c.y*T+4, width:T-8, height:T-8, rx:6,
+      fill:col, opacity:.92}));
+    if(c.hot) g.appendChild(el('rect',{x:pad+c.x*T+1, y:pad+c.y*T+1, width:T-2, height:T-2, rx:8,
+      fill:'none', stroke:'#fff', 'stroke-width':1.6, opacity:.55}));
+    const tx = el('text',{x:cx(c.x), y:cy(c.y)+3.5, 'text-anchor':'middle',
+      'font-family':'ui-monospace, Menlo, monospace', 'font-size':11.5, 'font-weight':700, fill:'#0b0e13'});
+    tx.textContent = def.s;
+    g.appendChild(tx);
+
+    if(c.d && def.k!=='modifier' && def.k!=='vault'){
+      const [ox,oy]=DIRV[c.d];
+      const ax=cx(c.x)+ox*(T/2-4), ay=cy(c.y)+oy*(T/2-4);
+      const px=-oy, py=ox;
+      g.appendChild(el('path',{
+        d:`M ${ax} ${ay} L ${ax-ox*7+px*5} ${ay-oy*7+py*5} L ${ax-ox*7-px*5} ${ay-oy*7-py*5} Z`,
+        fill:col}));
+    }
+    // secondary output edge (splitter / filter side-eject)
+    if(c.d2){
+      const [ox,oy]=DIRV[c.d2];
+      const ax=cx(c.x)+ox*(T/2-4), ay=cy(c.y)+oy*(T/2-4);
+      const px=-oy, py=ox;
+      g.appendChild(el('path',{
+        d:`M ${ax} ${ay} L ${ax-ox*7+px*5} ${ay-oy*7+py*5} L ${ax-ox*7-px*5} ${ay-oy*7-py*5} Z`,
+        fill:col, opacity:.6}));
+    }
+    svg.appendChild(g);
+  });
+
+  // free-floating annotations
+  (cfg.notes||[]).forEach(n=>{
+    const t = el('text',{x:pad+n.x*T+T/2, y:pad+n.y*T+T/2+4, 'text-anchor':'middle',
+      'font-family':'system-ui, sans-serif','font-size':11.5,'font-weight':600, fill:'#9fb0c3'});
+    t.textContent = n.text; svg.appendChild(t);
+  });
+
+  mount.appendChild(svg);
+
+  if(cfg.legend !== false){
+    const used = [...new Set(cells.filter(c=>c.t!=='belt').map(c=>DEFS[c.t] && DEFS[c.t].k))].filter(Boolean);
+    const row = document.createElement('div'); row.className='legend-row';
+    const names = {extractor:'Extractor', processor:'Processor', assembler:'Assembler',
+                   modifier:'Modifier (aura)', logistics:'Logistics', vault:'Vault'};
+    used.forEach(k=>{
+      const d=document.createElement('div'); d.className='lg';
+      d.innerHTML = `<i style="background:${C[k]}"></i>${names[k]}`;
+      row.appendChild(d);
+    });
+    if(cells.some(c=>c.t==='belt')){
+      const d=document.createElement('div'); d.className='lg';
+      d.innerHTML = `<i style="background:${C.belt}"></i>Belt`;
+      row.appendChild(d);
+    }
+    mount.appendChild(row);
+  }
+}
+
+/* ───────────── §3 anatomy ───────────── */
+renderGrid(document.getElementById('anatomy'), {
+  w:8, h:4, tile:60, alt:'Board anatomy: drill, belts, furnace with heat sink aura, vault',
+  cells:[
+    {x:0,y:1,t:'drill',d:'E'},
+    {x:1,y:1,t:'belt',d:'E',item:'#f0a63a'},
+    {x:2,y:1,t:'belt',d:'E'},
+    {x:3,y:1,t:'furnace',d:'E'},
+    {x:3,y:2,t:'heatsink',aura:true},
+    {x:3,y:3,t:'furnace',d:'N'},
+    {x:4,y:1,t:'belt',d:'E',item:'#e8623c'},
+    {x:5,y:1,t:'polisher',d:'E'},
+    {x:6,y:1,t:'belt',d:'E'},
+    {x:7,y:1,t:'vault'}
+  ],
+  notes:[{x:1,y:0,text:'item in transit'},{x:5,y:2,text:'+1 quality'},{x:2,y:3,text:'aura →'}]
+});
+
+/* ───────────── §4 value chain ───────────── */
+(function(){
+  const m = document.getElementById('chainfig');
+  const W=980,H=300;
+  const svg = el('svg',{viewBox:`0 0 ${W} ${H}`, width:W, height:H, role:'img',
+    'aria-label':'Value chain from raw tier 1 to product tier 4'});
+  svg.style.maxWidth='100%'; svg.style.height='auto'; svg.style.display='block';
+
+  const cols=[70,300,530,790];
+  const rows=[70,150,230];
+  const nodes=[
+    {c:0,r:0,l:'Ore',      v:'1',   col:C.extractor},
+    {c:0,r:1,l:'Sap',      v:'1',   col:C.extractor},
+    {c:0,r:2,l:'Crystal',  v:'1',   col:C.extractor},
+    {c:1,r:0,l:'Ingot',    v:'4',   col:C.processor},
+    {c:1,r:1,l:'Resin',    v:'4',   col:C.processor},
+    {c:1,r:2,l:'Shard',    v:'4',   col:C.processor},
+    {c:2,r:0,l:'Gear',     v:'16',  col:C.assembler},
+    {c:2,r:1,l:'Lens',     v:'16',  col:C.assembler},
+    {c:2,r:2,l:'Circuit',  v:'16',  col:C.assembler},
+    {c:3,r:0,l:'Engine',   v:'64',  col:C.vault},
+    {c:3,r:1,l:'Beacon',   v:'64',  col:C.vault},
+    {c:3,r:2,l:'Core',     v:'64',  col:C.vault}
+  ];
+  const NW=140,NH=44;
+  const px=n=>cols[n.c], py=n=>rows[n.r];
+  const find=(l)=>nodes.find(n=>n.l===l);
+
+  const links=[
+    ['Ore','Ingot'],['Sap','Resin'],['Crystal','Shard'],
+    ['Ingot','Gear'],['Ingot','Gear'],
+    ['Shard','Lens'],['Resin','Lens'],
+    ['Ingot','Circuit'],['Shard','Circuit'],
+    ['Gear','Engine'],['Circuit','Engine'],
+    ['Lens','Beacon'],['Circuit','Beacon'],
+    ['Gear','Core'],['Lens','Core']
+  ];
+  const seen={};
+  links.forEach(([a,b])=>{
+    const key=a+b; if(seen[key])return; seen[key]=1;
+    const A=find(a),B=find(b);
+    const x1=px(A)+NW, y1=py(A)+NH/2, x2=px(B), y2=py(B)+NH/2;
+    const mx=(x1+x2)/2;
+    svg.appendChild(el('path',{d:`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`,
+      fill:'none', stroke:'#2f3946', 'stroke-width':1.6}));
+  });
+
+  const tierLbl=['T1 · Raw','T2 · Refined','T3 · Component','T4 · Product'];
+  cols.forEach((x,i)=>{
+    const t=el('text',{x:x, y:34,'font-family':'ui-monospace, Menlo, monospace','font-size':11,
+      'font-weight':700,'letter-spacing':'0.1em',fill:'#6f8095'});
+    t.textContent=tierLbl[i].toUpperCase(); svg.appendChild(t);
+  });
+
+  nodes.forEach(n=>{
+    const g=el('g',{});
+    g.appendChild(el('rect',{x:px(n), y:py(n), width:NW, height:NH, rx:8,
+      fill:'#1b222c', stroke:n.col, 'stroke-width':1.5}));
+    g.appendChild(el('rect',{x:px(n), y:py(n), width:4, height:NH, rx:2, fill:n.col}));
+    const t=el('text',{x:px(n)+16, y:py(n)+27,'font-family':'system-ui, sans-serif','font-size':14.5,
+      'font-weight':600, fill:'#e8eef6'}); t.textContent=n.l; g.appendChild(t);
+    const v=el('text',{x:px(n)+NW-14, y:py(n)+27,'text-anchor':'end',
+      'font-family':'ui-monospace, Menlo, monospace','font-size':13, fill:'#9fb0c3'});
+    v.textContent=n.v; g.appendChild(v);
+    svg.appendChild(g);
+  });
+
+  const foot=el('text',{x:70,y:288,'font-family':'system-ui, sans-serif','font-size':12.5,fill:'#6f8095'});
+  foot.textContent='Numbers are base credit value. Final value = base × (1 + 0.25 × quality).';
+  svg.appendChild(foot);
+  m.appendChild(svg);
+})();
+
+/* ───────────── §5 machine cards ───────────── */
+(function(){
+  const order = {
+    extractor:['drill','tap','geode'],
+    processor:['furnace','retort','lapidary','compress'],
+    assembler:['fab','circuit','lens','engine'],
+    logistics:['belt','splitter','merger','filter','buffer','under'],
+    modifier:['overclock','polisher','heatsink','dup']
+  };
+  for(const k in order){
+    const host = document.getElementById('cat-'+k);
+    order[k].forEach(id=>{
+      const d = DEFS[id];
+      const c = document.createElement('div'); c.className='mcard';
+      c.innerHTML = `
+        <div class="top">
+          <div class="tile" style="background:${C[d.k]}">${d.s||'▸'}</div>
+          <h5>${d.n}</h5>
+          <span class="cost">${d.cost ? d.cost+'c' : '—'}</span>
+        </div>
+        <p>${d.d}</p>
+        ${d.tags.length?`<div class="tags">${d.tags.map(t=>`<span class="tag ${t}">${t}</span>`).join('')}</div>`:''}`;
+      host.appendChild(c);
+    });
+  }
+})();
+
+/* ───────────── §6 signature engines ───────────── */
+renderGrid(document.getElementById('synHeat'), {
+  w:5,h:5,tile:56, alt:'Heat cascade: heat sink surrounded by four furnaces',
+  cells:[
+    {x:2,y:0,t:'furnace',d:'N'},
+    {x:1,y:1,t:'overclock',aura:true},
+    {x:2,y:1,t:'furnace',d:'N',hot:true},
+    {x:1,y:2,t:'furnace',d:'W',hot:true},
+    {x:2,y:2,t:'heatsink',aura:true},
+    {x:3,y:2,t:'furnace',d:'E'},
+    {x:2,y:3,t:'furnace',d:'S'},
+    {x:0,y:2,t:'belt',d:'W'},
+    {x:4,y:2,t:'belt',d:'E'}
+  ],
+  notes:[{x:3,y:4,text:'white ring = double-buffed'}]
+});
+
+renderGrid(document.getElementById('synLoop'), {
+  w:7,h:5,tile:56, alt:'Polish loop: closed belt ring with three polishers and a filter gate',
+  cells:[
+    {x:3,y:0,t:'belt',d:'S'},{x:3,y:1,t:'belt',i:'N',d:'E'},
+    {x:1,y:1,t:'belt',i:'E',d:'S'},{x:2,y:1,t:'polisher',d:'W'},
+    {x:4,y:1,t:'polisher',d:'E'},{x:5,y:1,t:'belt',i:'W',d:'S'},
+    {x:5,y:2,t:'belt',d:'S'},
+    {x:5,y:3,t:'belt',i:'N',d:'W'},{x:4,y:3,t:'polisher',d:'W'},
+    {x:3,y:3,t:'belt',d:'W',item:'#8b7bf0'},{x:2,y:3,t:'belt',d:'W'},
+    {x:1,y:3,t:'belt',i:'E',d:'N'},
+    {x:1,y:2,t:'filter',d:'N',d2:'W'},
+    {x:0,y:2,t:'belt',d:'W',item:'#6fcf5f'}
+  ],
+  notes:[{x:3,y:2,text:'items lap until quality ≥ 9'},{x:0,y:1,text:'← to vault'},{x:3,y:4,text:'FIL gate at west'}]
+});
+
+renderGrid(document.getElementById('synDup'), {
+  w:7,h:5,tile:56, alt:'Duplication spiral: polish loop with a duplicator on the ring',
+  cells:[
+    {x:3,y:0,t:'belt',d:'S'},{x:3,y:1,t:'belt',i:'N',d:'E'},
+    {x:1,y:1,t:'belt',i:'E',d:'S'},{x:2,y:1,t:'polisher',d:'W'},
+    {x:4,y:1,t:'polisher',d:'E'},{x:5,y:1,t:'belt',i:'W',d:'S'},
+    {x:5,y:2,t:'dup',d:'S',hot:true},
+    {x:5,y:3,t:'belt',i:'N',d:'W'},{x:4,y:3,t:'polisher',d:'W'},
+    {x:3,y:3,t:'belt',d:'W',item:'#8b7bf0'},{x:2,y:3,t:'buffer',d:'W'},
+    {x:1,y:3,t:'belt',i:'E',d:'N'},
+    {x:1,y:2,t:'filter',d:'N',d2:'W'},
+    {x:0,y:2,t:'belt',d:'W',item:'#6fcf5f'}
+  ],
+  notes:[{x:3,y:2,text:'count grows as quality climbs'},{x:2,y:4,text:'BUF = bleed valve'},{x:0,y:1,text:'← to vault'}]
+});
+
+/* ───────────── §7 phase flow + cards ───────────── */
+(function(){
+  const m=document.getElementById('phaseflow');
+  const W=1000,H=150;
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H,role:'img',
+    'aria-label':'Six phase round loop'});
+  svg.style.maxWidth='100%';svg.style.height='auto';svg.style.display='block';
+  const names=['Briefing','Draft','Build','Shift','Payout','Reward'];
+  const cols=[C.logistics,C.extractor,C.assembler,C.processor,C.vault,C.modifier];
+  const bw=140,bh=52,gap=(W-40-bw*6)/5,y=34;
+  names.forEach((n,i)=>{
+    const x=20+i*(bw+gap);
+    svg.appendChild(el('rect',{x,y,width:bw,height:bh,rx:9,fill:'#1b222c',stroke:cols[i],'stroke-width':1.5}));
+    svg.appendChild(el('rect',{x,y,width:bw,height:3.5,rx:2,fill:cols[i]}));
+    const num=el('text',{x:x+13,y:y+24,'font-family':'ui-monospace, Menlo, monospace','font-size':11,
+      'font-weight':700,fill:'#6f8095'}); num.textContent='0'+(i+1); svg.appendChild(num);
+    const t=el('text',{x:x+13,y:y+42,'font-family':'system-ui, sans-serif','font-size':15,
+      'font-weight':650,fill:'#e8eef6'}); t.textContent=n; svg.appendChild(t);
+    if(i<5){
+      const ax=x+bw+6, ay=y+bh/2;
+      svg.appendChild(el('path',{d:`M ${ax} ${ay} L ${ax+gap-12} ${ay}`,stroke:'#38414d','stroke-width':1.6}));
+      svg.appendChild(el('path',{d:`M ${ax+gap-12} ${ay} l -6 -4 l 0 8 z`,fill:'#38414d'}));
+    }
+  });
+  const yb=y+bh+26;
+  svg.appendChild(el('path',{d:`M ${20+5*(bw+gap)+bw/2} ${y+bh} L ${20+5*(bw+gap)+bw/2} ${yb} L ${20+bw/2} ${yb} L ${20+bw/2} ${y+bh}`,
+    fill:'none',stroke:'#2f3946','stroke-width':1.6,'stroke-dasharray':'5 4'}));
+  svg.appendChild(el('path',{d:`M ${20+bw/2} ${y+bh+2} l -4 6 l 8 0 z`,fill:'#2f3946'}));
+  const lt=el('text',{x:W/2,y:yb+18,'text-anchor':'middle','font-family':'system-ui, sans-serif',
+    'font-size':12.5,fill:'#6f8095'}); lt.textContent='next round · quota × 1.8'; svg.appendChild(lt);
+  m.appendChild(svg);
+})();
+
+(function(){
+  const phases=[
+    {n:'Phase 01',t:'Briefing',col:C.logistics,
+     p:'The contract card flips over. You see the quota, the shift length, and any audit modifier — <em>before</em> you spend a credit. Information first, always; a roguelite that surprises you after you commit is just a dice roll.',
+     l:['Quota and shift length shown','Audit modifiers revealed in full','Your current board is still on screen behind it','Skippable in 2 seconds once you know the deck'],
+     art:'brief'},
+    {n:'Phase 02',t:'Draft',col:C.extractor,
+     p:'Three machine offers, one module slot, one relic slot. Two free rerolls. Prices scale with tier, not with round, so a Drill is 3 credits in round 12 too — meaning early machines stay viable as filler and you always have something to do with leftover change.',
+     l:['3 machines · 1 module · 1 relic','2 free rerolls, then 5c each','Sell anything on the board for 50% (100% with Scrap Heap)','Unspent credits earn 5% interest, capped at 25'],
+     art:'draft'},
+    {n:'Phase 03',t:'Build',col:C.assembler,
+     p:'Untimed. Place, rotate, drag, delete. A live <strong>preview sim</strong> runs the board at 8× in a corner panel so you can see jams and starvation before you commit — this is the single most important UI in the game and it should be on by default.',
+     l:['Untimed and fully reversible','Preview sim shows projected payout live','Jams flagged in red, starved machines in amber','Undo stack for the whole phase'],
+     art:'build'},
+    {n:'Phase 04',t:'Shift',col:C.processor,
+     p:'60 ticks. The only phase with a clock. Items flow, the tick counter runs, the payout meter climbs. Speed controls 1× / 2× / 4× / instant. You cannot intervene — this is the reward for phase 3, not a second chance at it.',
+     l:['60 ticks (30 under Rush Order)','No player input except speed','Payout meter and quota line both visible','Items in flight at tick 60 are forfeit'],
+     art:'shift'},
+    {n:'Phase 05',t:'Payout',col:C.vault,
+     p:'The tally, itemised and animated: base value, then quality multiplier, then relic multipliers, each landing as its own line. Surplus above quota converts to credits at 1:1. Below quota, the run ends here.',
+     l:['Itemised: base → quality → relics','Surplus = your entire budget for next round','Overflow bonus above 150% of quota','Miss the quota and the run is over'],
+     art:'payout'},
+    {n:'Phase 06',t:'Reward',col:C.modifier,
+     p:'Choose one of three: a rare machine, a module to socket into an existing machine, or a grid expansion. Audit rounds swap the machine slot for a relic. This is the only unconditional gift in the round and it should always feel like a real choice.',
+     l:['1 of 3: rare machine · module · grid expansion','Audit rounds offer relics instead','Modules socket into a placed machine permanently','Grid expansion is +1 row or +1 column, your pick'],
+     art:'reward'}
+  ];
+
+  function art(kind,col){
+    const svg=el('svg',{viewBox:'0 0 180 108',width:180,height:108,'aria-hidden':'true'});
+    svg.style.width='100%';svg.style.height='auto';svg.style.maxWidth='196px';
+    const bg=el('rect',{x:0,y:0,width:180,height:108,rx:8,fill:'#12171f'}); svg.appendChild(bg);
+    const R=(a)=>svg.appendChild(el('rect',a));
+    const P=(a)=>svg.appendChild(el('path',a));
+    if(kind==='brief'){
+      R({x:24,y:16,width:132,height:76,rx:6,fill:'#1b222c',stroke:col,'stroke-width':1.4});
+      R({x:38,y:30,width:60,height:6,rx:3,fill:'#3a4655'});
+      R({x:38,y:44,width:104,height:14,rx:4,fill:'#242d39'});
+      R({x:38,y:44,width:72,height:14,rx:4,fill:col,opacity:.85});
+      R({x:38,y:68,width:44,height:6,rx:3,fill:'#3a4655'});
+      R({x:88,y:68,width:30,height:6,rx:3,fill:'#3a4655'});
+    }
+    if(kind==='draft'){
+      [14,66,118].forEach((x,i)=>{
+        R({x,y:22,width:48,height:64,rx:6,fill:'#1b222c',stroke:i===1?col:'#2b3541','stroke-width':i===1?1.8:1.2});
+        R({x:x+13,y:36,width:22,height:22,rx:5,fill:i===1?col:'#3a4655'});
+        R({x:x+10,y:68,width:28,height:5,rx:2.5,fill:'#3a4655'});
+      });
+    }
+    if(kind==='build'){
+      for(let y=0;y<4;y++)for(let x=0;x<6;x++)
+        R({x:16+x*25,y:16+y*22,width:22,height:19,rx:4,fill:'#1b222c',stroke:'#262f3b','stroke-width':1});
+      R({x:16,y:38,width:22,height:19,rx:4,fill:C.extractor});
+      R({x:66,y:38,width:22,height:19,rx:4,fill:C.processor});
+      R({x:141,y:38,width:22,height:19,rx:4,fill:C.vault});
+      R({x:41,y:45,width:22,height:5,rx:2.5,fill:'#3a4655'});
+      R({x:91,y:45,width:47,height:5,rx:2.5,fill:'#3a4655'});
+      R({x:91,y:16,width:22,height:19,rx:4,fill:'none',stroke:col,'stroke-width':1.5,'stroke-dasharray':'3 2'});
+    }
+    if(kind==='shift'){
+      R({x:16,y:22,width:148,height:34,rx:6,fill:'#1b222c',stroke:'#262f3b','stroke-width':1});
+      R({x:22,y:36,width:136,height:6,rx:3,fill:'#3a4655'});
+      [34,58,82,106,130].forEach((x,i)=>svg.appendChild(el('circle',
+        {cx:x,cy:39,r:5,fill:[C.extractor,C.extractor,C.processor,C.processor,C.assembler][i],
+         stroke:'#1b222c','stroke-width':2})));
+      R({x:16,y:72,width:148,height:10,rx:5,fill:'#242d39'});
+      R({x:16,y:72,width:94,height:10,rx:5,fill:col});
+      const t=el('text',{x:16,y:98,'font-family':'ui-monospace, Menlo, monospace','font-size':10,fill:'#6f8095'});
+      t.textContent='TICK 38 / 60'; svg.appendChild(t);
+    }
+    if(kind==='payout'){
+      [0,1,2].forEach(i=>{
+        R({x:16,y:20+i*20,width:60,height:6,rx:3,fill:'#3a4655'});
+        R({x:96,y:18+i*20,width:[30,44,58][i],height:10,rx:4,fill:col,opacity:[.45,.7,1][i]});
+      });
+      P({d:'M 16 88 L 164 88',stroke:'#38414d','stroke-width':1.4});
+      R({x:16,y:78,width:148,height:0.1,fill:'none'});
+      const t=el('text',{x:164,y:100,'text-anchor':'end','font-family':'ui-monospace, Menlo, monospace',
+        'font-size':13,'font-weight':700,fill:col}); t.textContent='+1,580'; svg.appendChild(t);
+    }
+    if(kind==='reward'){
+      [14,66,118].forEach((x,i)=>{
+        R({x,y:20,width:48,height:68,rx:6,fill:'#1b222c',stroke:i===2?col:'#2b3541','stroke-width':i===2?2:1.2});
+        if(i===2) R({x:x-3,y:17,width:54,height:74,rx:8,fill:'none',stroke:col,'stroke-width':1,opacity:.4});
+        R({x:x+14,y:34,width:20,height:20,rx:10,fill:i===2?col:'#3a4655'});
+        R({x:x+9,y:64,width:30,height:5,rx:2.5,fill:'#3a4655'});
+        R({x:x+14,y:74,width:20,height:5,rx:2.5,fill:'#2b3541'});
+      });
+    }
+    return svg;
+  }
+
+  const host=document.getElementById('phasecards');
+  phases.forEach(ph=>{
+    const d=document.createElement('div'); d.className='phase';
+    const left=document.createElement('div'); left.appendChild(art(ph.art,ph.col));
+    const right=document.createElement('div');
+    right.innerHTML=`<div class="pn" style="color:${ph.col}">${ph.n.toUpperCase()}</div>
+      <h4>${ph.t}</h4><p>${ph.p}</p><ul>${ph.l.map(x=>`<li>${x}</li>`).join('')}</ul>`;
+    d.appendChild(left); d.appendChild(right); host.appendChild(d);
+  });
+})();
+
+/* ───────────── §8 walkthrough boards ───────────── */
+renderGrid(document.getElementById('wt1'), {
+  w:8,h:5,tile:54, alt:'Round 1 board: one drill, one furnace, one vault',
+  cells:[
+    {x:0,y:2,t:'drill',d:'E'},
+    {x:1,y:2,t:'belt',d:'E',item:'#f0a63a'},{x:2,y:2,t:'belt',d:'E'},
+    {x:3,y:2,t:'furnace',d:'E'},
+    {x:4,y:2,t:'belt',d:'E',item:'#e8623c'},{x:5,y:2,t:'belt',d:'E'},
+    {x:6,y:2,t:'belt',d:'E',item:'#e8623c'},
+    {x:7,y:2,t:'vault'}
+  ],
+  notes:[{x:2,y:1,text:'1 ore / 4 ticks'},{x:5,y:1,text:'7 ticks of transit'}]
+});
+
+renderGrid(document.getElementById('wt4'), {
+  w:8,h:5,tile:54, alt:'Round 4 board: two lanes, overclocker, fabricator, polisher',
+  cells:[
+    {x:0,y:1,t:'drill',d:'E'},{x:1,y:1,t:'belt',d:'E'},{x:2,y:1,t:'furnace',d:'E',hot:true},
+    {x:3,y:1,t:'belt',d:'E'},{x:4,y:1,t:'belt',i:'W',d:'S'},
+    {x:2,y:2,t:'heatsink',aura:true},
+    {x:0,y:3,t:'drill',d:'E'},{x:1,y:3,t:'belt',d:'E'},{x:2,y:3,t:'furnace',d:'E',hot:true},
+    {x:3,y:3,t:'belt',d:'E'},{x:4,y:3,t:'belt',i:'W',d:'N'},
+    {x:4,y:2,t:'merger',d:'E'},
+    {x:5,y:1,t:'overclock',aura:true},
+    {x:5,y:2,t:'fab',d:'E',hot:true},
+    {x:6,y:2,t:'polisher',d:'E'},
+    {x:7,y:2,t:'vault'}
+  ],
+  notes:[{x:1,y:0,text:'heat sink: +1 quality'},{x:6,y:1,text:'polisher: +1 more'},{x:6,y:3,text:'gear @ q2 = 24c'}]
+});
+
+renderGrid(document.getElementById('wt7'), {
+  w:10,h:8,tile:50, alt:'Round 7 board: three lanes feeding a fabricator and a polish loop',
+  cells:[
+    {x:0,y:1,t:'drill',d:'E'},{x:1,y:1,t:'belt',d:'E'},{x:2,y:1,t:'furnace',d:'E'},
+    {x:3,y:1,t:'belt',d:'E'},{x:4,y:1,t:'belt',i:'W',d:'S'},
+    {x:2,y:2,t:'heatsink',aura:true},
+    {x:0,y:3,t:'drill',d:'E'},{x:1,y:3,t:'belt',d:'E'},{x:2,y:3,t:'furnace',d:'E'},
+    {x:3,y:3,t:'belt',d:'E'},
+    {x:2,y:4,t:'heatsink',aura:true},
+    {x:0,y:5,t:'drill',d:'E'},{x:1,y:5,t:'belt',d:'E'},{x:2,y:5,t:'furnace',d:'E'},
+    {x:3,y:5,t:'belt',d:'E'},{x:4,y:5,t:'belt',i:'W',d:'N'},
+    {x:4,y:3,t:'merger',d:'E'},
+    {x:5,y:2,t:'overclock',aura:true},
+    {x:5,y:3,t:'fab',d:'E',hot:true},
+    {x:6,y:3,t:'belt',d:'E'},{x:7,y:3,t:'belt',i:'W',d:'S'},{x:7,y:4,t:'belt',d:'S'},
+    {x:6,y:5,t:'belt',d:'E'},{x:7,y:5,t:'polisher',d:'E'},{x:8,y:5,t:'belt',d:'E'},
+    {x:9,y:5,t:'belt',i:'W',d:'S'},{x:9,y:6,t:'dup',d:'S'},
+    {x:9,y:7,t:'belt',i:'N',d:'W'},{x:8,y:7,t:'polisher',d:'W'},{x:7,y:7,t:'belt',d:'W'},
+    {x:6,y:7,t:'belt',i:'E',d:'N'},{x:6,y:6,t:'filter',d:'N',d2:'W'},
+    {x:5,y:6,t:'belt',d:'W',item:'#8b7bf0'},{x:4,y:6,t:'vault'}
+  ],
+  notes:[{x:8,y:4,text:'polish ring'},{x:4,y:7,text:'gate: q ≥ 9'},{x:1,y:7,text:'3 lanes → 1 assembler'}]
+});
+
+renderGrid(document.getElementById('wt11'), {
+  w:12,h:9,tile:48, alt:'Round 11 board: two raw branches, engine works, large polish ring, two vaults',
+  cells:[
+    /* ore branch */
+    {x:0,y:0,t:'drill',d:'E'},{x:1,y:0,t:'belt',d:'E'},{x:2,y:0,t:'furnace',d:'E'},
+    {x:3,y:0,t:'belt',d:'E'},{x:4,y:0,t:'belt',i:'W',d:'S'},
+    {x:2,y:1,t:'heatsink',aura:true},
+    {x:0,y:2,t:'drill',d:'E'},{x:1,y:2,t:'belt',d:'E'},{x:2,y:2,t:'furnace',d:'E'},
+    {x:3,y:2,t:'belt',d:'E'},{x:4,y:2,t:'belt',i:'W',d:'N'},
+    {x:4,y:1,t:'merger',d:'E'},
+    {x:5,y:1,t:'splitter',d:'E',d2:'S'},
+    {x:6,y:0,t:'overclock',aura:true},
+    {x:6,y:1,t:'fab',d:'E'},
+    {x:7,y:1,t:'belt',d:'E'},{x:8,y:1,t:'belt',i:'W',d:'S'},
+    /* crystal branch */
+    {x:0,y:5,t:'geode',d:'E'},{x:1,y:5,t:'belt',d:'E'},{x:2,y:5,t:'lapidary',d:'E'},
+    {x:3,y:5,t:'belt',d:'E'},{x:4,y:5,t:'belt',i:'W',d:'N'},{x:4,y:4,t:'belt',d:'N'},
+    {x:4,y:3,t:'belt',i:'S',d:'E'},
+    {x:5,y:2,t:'belt',d:'S'},
+    {x:5,y:3,t:'merger',d:'E'},
+    {x:6,y:3,t:'circuit',d:'E'},
+    {x:7,y:3,t:'belt',d:'E'},{x:8,y:3,t:'belt',i:'W',d:'N'},
+    /* engine works */
+    {x:7,y:2,t:'overclock',aura:true},
+    {x:8,y:2,t:'engine',d:'E',hot:true},
+    {x:9,y:2,t:'belt',d:'E'},{x:10,y:2,t:'belt',i:'W',d:'S'},
+    {x:10,y:3,t:'belt',d:'S'},{x:10,y:4,t:'belt',d:'S'},
+    /* polish ring */
+    {x:8,y:5,t:'belt',d:'E'},{x:9,y:5,t:'polisher',d:'E'},{x:10,y:5,t:'polisher',d:'E'},
+    {x:11,y:5,t:'belt',i:'W',d:'S'},{x:11,y:6,t:'dup',d:'S'},{x:11,y:7,t:'belt',d:'S'},
+    {x:11,y:8,t:'belt',i:'N',d:'W'},{x:10,y:8,t:'polisher',d:'W'},{x:9,y:8,t:'buffer',d:'W'},
+    {x:8,y:8,t:'belt',i:'E',d:'N'},{x:8,y:7,t:'belt',d:'N'},
+    {x:8,y:6,t:'filter',d:'N',d2:'W'},
+    {x:7,y:6,t:'belt',d:'W'},{x:6,y:6,t:'belt',d:'W',item:'#6fcf5f'},
+    {x:5,y:6,t:'vault'},
+    /* compressor side line */
+    {x:0,y:7,t:'drill',d:'E'},{x:1,y:7,t:'belt',d:'E'},{x:2,y:7,t:'compress',d:'E'},
+    {x:3,y:7,t:'belt',d:'E'},{x:4,y:7,t:'belt',d:'E'},{x:5,y:7,t:'vault'}
+  ],
+  notes:[
+    {x:9,y:4,text:'gate: q ≥ 17'},
+    {x:1,y:1,text:'ore branch'},
+    {x:1,y:4,text:'crystal branch'},
+    {x:3,y:8,text:'tier-2 line → 2nd vault'},
+    {x:6,y:8,text:'BUF bleeds the ring'}
+  ]
+});
+
+/* ───────────── §9 escalation chart ───────────── */
+(function(){
+  const data=[
+    {r:1, q:20,    d:52,    audit:false},
+    {r:2, q:45,    d:96,    audit:false},
+    {r:3, q:90,    d:178,   audit:false},
+    {r:4, q:200,   d:240,   audit:true},
+    {r:5, q:400,   d:520,   audit:false},
+    {r:6, q:700,   d:910,   audit:false},
+    {r:7, q:1200,  d:1580,  audit:false},
+    {r:8, q:2400,  d:2760,  audit:true},
+    {r:9, q:4500,  d:6300,  audit:false},
+    {r:10,q:8000,  d:11200, audit:false},
+    {r:11,q:14000, d:19500, audit:false},
+    {r:12,q:30000, d:34100, audit:true}
+  ];
+  const S1=getComputedStyle(document.documentElement).getPropertyValue('--series-1').trim();
+  const S2=getComputedStyle(document.documentElement).getPropertyValue('--series-2').trim();
+  const SURF='#151a22';
+
+  const W=980,H=380,mL=54,mR=88,mT=18,mB=44;
+  const pw=W-mL-mR, ph=H-mT-mB;
+  const lo=Math.log10(10), hi=Math.log10(60000);
+  const X=i=>mL+(i/(data.length-1))*pw;
+  const Y=v=>mT+ph-((Math.log10(v)-lo)/(hi-lo))*ph;
+
+  const host=document.getElementById('curvechart');
+  const svg=el('svg',{viewBox:`0 0 ${W} ${H}`,width:W,height:H,role:'img',
+    'aria-label':'Line chart of delivered value and quota across twelve rounds, log scale'});
+  svg.style.maxWidth='100%';svg.style.height='auto';svg.style.display='block';
+
+  // audit bands
+  data.forEach((d,i)=>{ if(!d.audit) return;
+    svg.appendChild(el('rect',{x:X(i)-13,y:mT,width:26,height:ph,rx:4,fill:S2,opacity:.09}));
+  });
+
+  // gridlines
+  [10,100,1000,10000].forEach(v=>{
+    svg.appendChild(el('line',{x1:mL,x2:mL+pw,y1:Y(v),y2:Y(v),stroke:'#2c333d','stroke-width':1}));
+    const t=el('text',{x:mL-10,y:Y(v)+4,'text-anchor':'end','font-family':'system-ui, sans-serif',
+      'font-size':11.5,fill:'#6f8095','font-variant-numeric':'tabular-nums'});
+    t.textContent=v.toLocaleString(); svg.appendChild(t);
+  });
+  svg.appendChild(el('line',{x1:mL,x2:mL+pw,y1:mT+ph,y2:mT+ph,stroke:'#38414d','stroke-width':1}));
+
+  // x labels
+  data.forEach((d,i)=>{
+    const t=el('text',{x:X(i),y:mT+ph+20,'text-anchor':'middle','font-family':'system-ui, sans-serif',
+      'font-size':11.5,fill:d.audit?'#c8a08c':'#6f8095','font-variant-numeric':'tabular-nums'});
+    t.textContent=d.r; svg.appendChild(t);
+  });
+  const xl=el('text',{x:mL+pw/2,y:mT+ph+38,'text-anchor':'middle','font-family':'system-ui, sans-serif',
+    'font-size':11.5,fill:'#6f8095'}); xl.textContent='round'; svg.appendChild(xl);
+
+  const line=(key,col)=>{
+    const d=data.map((p,i)=>`${i?'L':'M'} ${X(i)} ${Y(p[key])}`).join(' ');
+    svg.appendChild(el('path',{d,fill:'none',stroke:col,'stroke-width':2,
+      'stroke-linejoin':'round','stroke-linecap':'round'}));
+  };
+  line('q',S2); line('d',S1);
+
+  // end markers with surface ring
+  [['d',S1],['q',S2]].forEach(([k,col])=>{
+    const i=data.length-1;
+    svg.appendChild(el('circle',{cx:X(i),cy:Y(data[i][k]),r:5,fill:col,stroke:SURF,'stroke-width':2}));
+    const t=el('text',{x:X(i)+12,y:Y(data[i][k])+(k==='d'?-2:14),'font-family':'system-ui, sans-serif',
+      'font-size':12.5,'font-weight':650,fill:'#e8eef6','font-variant-numeric':'tabular-nums'});
+    t.textContent=data[i][k].toLocaleString(); svg.appendChild(t);
+  });
+
+  // audit labels
+  data.forEach((d,i)=>{ if(!d.audit) return;
+    const t=el('text',{x:X(i),y:mT-4,'text-anchor':'middle','font-family':'ui-monospace, Menlo, monospace',
+      'font-size':9.5,'font-weight':700,'letter-spacing':'0.08em',fill:'#a57a63'});
+    t.textContent='AUDIT'; svg.appendChild(t);
+  });
+
+  // crosshair + hover
+  const cross=el('line',{x1:0,x2:0,y1:mT,y2:mT+ph,stroke:'#4a5666','stroke-width':1,opacity:0});
+  svg.appendChild(cross);
+  const hd=el('circle',{r:5,fill:S1,stroke:SURF,'stroke-width':2,opacity:0}); svg.appendChild(hd);
+  const hq=el('circle',{r:5,fill:S2,stroke:SURF,'stroke-width':2,opacity:0}); svg.appendChild(hq);
+  const hit=el('rect',{x:mL,y:mT,width:pw,height:ph,fill:'transparent'}); svg.appendChild(hit);
+
+  const tip=document.getElementById('tip');
+  const card=host.closest('.chart-card');
+  function move(ev){
+    const b=svg.getBoundingClientRect();
+    const px=(ev.clientX-b.left)/b.width*W;
+    let i=Math.round((px-mL)/pw*(data.length-1));
+    i=Math.max(0,Math.min(data.length-1,i));
+    const d=data[i];
+    cross.setAttribute('x1',X(i)); cross.setAttribute('x2',X(i)); cross.setAttribute('opacity',1);
+    hd.setAttribute('cx',X(i)); hd.setAttribute('cy',Y(d.d)); hd.setAttribute('opacity',1);
+    hq.setAttribute('cx',X(i)); hq.setAttribute('cy',Y(d.q)); hq.setAttribute('opacity',1);
+    const ratio=(d.d/d.q*100).toFixed(0);
+    tip.innerHTML=`<div class="h">Round ${d.r}${d.audit?' · Audit':''}</div>
+      <div class="r"><span><i style="background:${S1}"></i>Delivered</span><span>${d.d.toLocaleString()}</span></div>
+      <div class="r"><span><i style="background:${S2}"></i>Quota</span><span>${d.q.toLocaleString()}</span></div>
+      <div class="r" style="margin-top:5px;padding-top:5px;border-top:1px solid #262f3b"><span>Margin</span><span>${ratio}%</span></div>`;
+    const cb=card.getBoundingClientRect();
+    tip.style.opacity=1;
+    tip.style.left=Math.min(cb.width-180, Math.max(8, ev.clientX-cb.left+14))+'px';
+    tip.style.top=(ev.clientY-cb.top-10)+'px';
+  }
+  hit.addEventListener('mousemove',move);
+  hit.addEventListener('mouseleave',()=>{
+    tip.style.opacity=0; cross.setAttribute('opacity',0);
+    hd.setAttribute('opacity',0); hq.setAttribute('opacity',0);
+  });
+
+  host.appendChild(svg);
+
+  // table view
+  const tw=document.getElementById('curveTable');
+  tw.innerHTML='<table><thead><tr><th>Round</th><th class="num">Quota</th><th class="num">Delivered</th><th class="num">Margin</th></tr></thead><tbody>'+
+    data.map(d=>`<tr><td>${d.r}${d.audit?' · Audit':''}</td><td class="num">${d.q.toLocaleString()}</td><td class="num">${d.d.toLocaleString()}</td><td class="num">${(d.d/d.q*100).toFixed(0)}%</td></tr>`).join('')+
+    '</tbody></table>';
+  const btn=document.getElementById('tblBtn');
+  btn.addEventListener('click',()=>{
+    const open=tw.hasAttribute('hidden');
+    if(open){tw.removeAttribute('hidden');btn.textContent='Hide data table';btn.setAttribute('aria-expanded','true');}
+    else{tw.setAttribute('hidden','');btn.textContent='Show data table';btn.setAttribute('aria-expanded','false');}
+  });
+})();
+</script>
+</body>
+</html>

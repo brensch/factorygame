@@ -1,0 +1,8 @@
+[package]
+name = "overflow-lab"
+version = "0.1.0"
+edition.workspace = true
+description = "Headless playtesting harness: bots play full runs, outcomes become balance data."
+
+[dependencies]
+overflow-core = { path = "../core" }

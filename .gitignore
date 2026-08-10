@@ -10,3 +10,6 @@ export_presets.cfg
 
 # built prototype — the Pages workflow builds this from prototype/ + sim/
 docs/play/
+
+# Rust
+rust/target/

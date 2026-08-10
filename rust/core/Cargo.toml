@@ -1,0 +1,8 @@
+[package]
+name = "overflow-core"
+version = "0.1.0"
+edition.workspace = true
+description = "OVERFLOW game rules: deterministic tick sim + deck/run structure. No engine types, no I/O, no dependencies."
+
+[dependencies]
+# none, deliberately — this crate must compile to wasm32 and embed in Bevy unchanged

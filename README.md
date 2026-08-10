@@ -55,15 +55,32 @@ deadlocking**, which is what makes the polish-loop build legal at all. See the c
 
 ## Engine
 
-**Godot 4.x**, GDScript, no physics. Runner-up was TypeScript + PixiJS.
+**Bevy** — decided 2026-08-10, after measuring rather than guessing. The game wants extreme
+on-screen item counts scaling from desktop down to mobile, and the simulation that drives them
+is where engines actually differ: GDScript measured **29× slower** than JIT'd JS on the transfer
+loop, while the Rust core below does **32,500 items in flight at 4.7 ms/tick** single-threaded.
 
-The load-bearing rule, whichever engine wins: the factory is a **pure deterministic tick
-simulation over a 2D array**. No Node per item, no delta time, no engine types in the sim layer.
-The renderer reads sim state and never writes back. That's what gives you 8× fast-forward, seed
-replay, headless balance testing, and a late-game board with 2,000 items drawn in one
-`MultiMeshInstance2D` call.
+The choice is deliberately cheap to reverse: the whole game lives in an engine-free Rust crate,
+and Bevy will be a renderer over it. The load-bearing rule survives from day one: the factory is
+a pure deterministic tick simulation; the renderer reads sim state and never writes back.
 
-The TypeScript sim here is deliberately written to that constraint so it ports mechanically.
+## 🦀 The Rust core and lab
+
+[`rust/`](rust/) — the canonical implementation going forward.
+
+- **`core/`** — the game: the tick sim (ported 1:1 from `sim/`, pinned by the same 19 test
+  assertions to the same numbers), plus the **blueprint-card deck** and the round/run structure.
+  Zero dependencies; compiles to wasm32 unchanged, and CI enforces that it stays wasm-clean.
+- **`lab/`** — headless playtesting: bots play thousands of complete seeded runs and the
+  outcome distribution becomes balance data.
+  `cargo run --release -p overflow-lab -- --runs 2000`
+
+First real finding from the lab: the naive lane-building bot dies at **round 4 in 2,000 of
+2,000 runs** — precisely the wall the design doc claims forces players off pure widening.
+
+The TypeScript `sim/` stays for now as the browser prototype's engine and as a cross-check —
+two independent implementations agreeing on 19 pinned numbers. It retires when the WASM build of
+the core replaces it under the same canvas UI.
 
 ## Toolchain
 

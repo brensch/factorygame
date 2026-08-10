@@ -36,6 +36,34 @@ loop. Still missing:
 - Relics and audit modifiers. The prototype has rounds, quota and unlocks, but audits are only
   flagged in the header; they do not yet change any rule.
 
+## The card/deck redesign (2026-08-10) — open questions
+
+The palette-shop is gone; machines are now **blueprint cards**: a run deck, a hand dealt each
+round, rewards add cards to the deck, placing a machine consumes its card, selling returns it.
+Belts stay as 1-credit infrastructure — a deck of belt cards is a deck of dead draws.
+Implemented in `rust/core/src/deck.rs` + `run.rs`. Unresolved:
+
+1. **Hand size and dead hands.** A mid-run deck of 15 with hand size 4 can deal zero playable
+   cards. Mulligan? Scry? Credits-to-redraw?
+2. **Are consumed cards the right scarcity?** Placing removes the card permanently (selling
+   recovers it). Alternative: cards as reusable blueprints, credits as the only limit — less
+   scarcity, more combo. The lab can answer this empirically: implement both, compare
+   run-length distributions.
+3. **Rarity/weighting.** Offers are currently uniform over the unlocked pool. Rarity tiers
+   change both balance and the dopamine curve.
+4. **Should configuration live on the card?** A "Filter ≥7" card vs a "Filter ≥3" card, rather
+   than a threshold set at placement — more draft texture, less fiddling.
+
+## What the lab has measured so far
+
+- **LaneBot (widen-only) dies at round 4 in 2,000/2,000 runs.** Quota 200 is exactly the wall
+  the design doc says forces a tier jump. The zero variance also says rounds 1–3 are pure
+  formality even for a trivial player — consider tightening.
+- Full runs simulate at ~6,200/sec single-threaded, so parameter sweeps over `defs.rs` are cheap.
+- Next bots, in order: TierBot (knows the Fabricator), LoopBot (knows the gated polish ring),
+  then a search-based baseline. The spread between their death rounds is a direct measurement
+  of how much depth each mechanic actually buys.
+
 ## Design questions I could not resolve on paper
 
 1. **Is the Duplicator spiral tunable, or just a trap?** It's meant to be a thrilling instability.

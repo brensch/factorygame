@@ -1,20 +1,76 @@
 /**
- * OVERFLOW prototype — playable shell around the reference simulation.
+ * OVERFLOW prototype — canvas shell over the Rust core compiled to wasm.
  *
- * This file owns presentation and the run structure (rounds, quota, shop).
- * It owns NO game rules: every rule comes from ../sim/src. That's deliberate —
- * the sim is under test, and the prototype must not be allowed to quietly grow
- * a second, untested copy of the mechanics.
+ * This file owns presentation and input, nothing else. Every rule — the sim,
+ * the card deck, quotas, credits, what's legal to place where — lives in
+ * `rust/core`, reached through the JSON ABI in `rust/web`. The maps below are
+ * cosmetic (colours and labels keyed by machine name); if a decision affects
+ * the outcome of a run, it is not made here.
  */
 
-import { Sim, type Placement, type Item } from "../sim/src/sim";
-import { DEFS, DIRV, type Dir } from "../sim/src/defs";
+// ── types mirroring the wire format (rust/web/src/lib.rs) ────────────────────
+type Dir = "N" | "E" | "S" | "W";
 
-// ── board / run configuration ────────────────────────────────────────────────
-const W = 10, H = 7;
-const QUOTAS = [20, 45, 90, 200, 400, 700, 1200, 2400, 4500, 8000, 14000, 30000];
-const AUDIT = [3, 7, 11];                    // zero-based round indices
-const SHIFT = (r: number) => (r === 11 ? 30 : 60); // final audit halves the shift
+interface Card { m: string; name: string; cost: number; kind: string }
+interface Pl {
+  x: number; y: number; m: string; kind: string;
+  d: Dir | null; d2: Dir | null; minQ: number | null;
+}
+interface Outcome {
+  round: number; payout: number; quota: number;
+  cleared: boolean; inFlight: number; jamTicks: number;
+}
+interface State {
+  round: number; credits: number; quota: number; shiftLen: number;
+  audit: boolean; phase: "build" | "reward" | "over"; won: boolean;
+  qualityCap: number; boardW: number; boardH: number;
+  board: Pl[]; hand: Card[]; offers: Card[];
+  deckDraw: number; deckDiscard: number;
+  auras: { x: number; y: number }[];
+  last: Outcome | null; err: string | null;
+}
+interface Frame {
+  tick: number; total: number; payout: number; done: boolean;
+  items: { id: number; x: number; y: number; t: string; q: number }[];
+  moves: { id: number; fx: number; fy: number }[];
+}
+
+// ── wasm boot ────────────────────────────────────────────────────────────────
+const wasm = await WebAssembly.instantiate(
+  await (await fetch("./game.wasm")).arrayBuffer(), {},
+);
+const core = wasm.instance.exports as {
+  memory: WebAssembly.Memory;
+  out_ptr(): number;
+  boot(seed: number): number;
+  state(): number;
+  belt(x: number, y: number, d: number): number;
+  play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
+  sell(x: number, y: number): number;
+  rotate(x: number, y: number): number;
+  rotate2(x: number, y: number): number;
+  set_gate(x: number, y: number, q: number): number;
+  pick_reward(i: number): number;
+  project(): number;
+  shift_start(): number;
+  shift_step(): number;
+  shift_finish(): number;
+};
+
+const decoder = new TextDecoder();
+function read<T>(len: number): T {
+  return JSON.parse(
+    decoder.decode(new Uint8Array(core.memory.buffer, core.out_ptr(), len)),
+  ) as T;
+}
+
+const DCODE: Record<Dir, number> = { N: 0, E: 1, S: 2, W: 3 };
+const dc = (d: Dir | null) => (d === null ? -1 : DCODE[d]);
+
+// ── cosmetic maps — colours and labels only ──────────────────────────────────
+const DIRV: Record<Dir, [number, number]> = { N: [0, -1], E: [1, 0], S: [0, 1], W: [-1, 0] };
+const ORDER: Dir[] = ["N", "E", "S", "W"];
+const turn = (d: Dir, n = 1): Dir => ORDER[(ORDER.indexOf(d) + n + 4) % 4];
 
 const CAT: Record<string, string> = {
   extractor: "#f0a63a", processor: "#e8623c", assembler: "#8b7bf0",
@@ -34,54 +90,44 @@ const ITEM_COLOR: Record<string, string> = {
   engine: "#6fcf5f", core: "#ffe08a", beacon: "#9fe8ff",
 };
 
-const START_UNLOCKED = ["belt", "drill", "furnace"];
-const UNLOCK_POOL = [
-  "polisher", "heatsink", "overclock", "merger", "fab", "splitter", "filter",
-  "buffer", "dup", "tap", "retort", "geode", "lapidary", "circuit", "lens",
-  "compress", "engine",
-];
+// ── client state: what the player is doing, never what the game is ───────────
+type Tool = { kind: "belt" } | { kind: "card"; idx: number };
 
-// ── game state ───────────────────────────────────────────────────────────────
-type Phase = "build" | "shift" | "over";
-
-interface Cell extends Placement {}
-
-const S = {
-  round: 0,
-  credits: 15,
-  phase: "build" as Phase,
-  cells: new Map<string, Cell>(),
-  unlocked: new Set(START_UNLOCKED),
-  tool: "belt",
+let G: State;
+const ui = {
+  tool: { kind: "belt" } as Tool,
   dir: "E" as Dir,
-  selected: null as string | null,
-  sim: null as Sim | null,
+  selected: null as { x: number; y: number } | null,
+  animating: false,
   speed: 1,
-  rngSeed: 12345,
-  positions: new Map<number, { x: number; y: number; px: number; py: number; item: Item }>(),
+  positions: new Map<number, { x: number; y: number; px: number; py: number; t: string; q: number }>(),
   alpha: 0,
+  tick: 0,
+  payout: 0,
 };
 
-const key = (x: number, y: number) => `${x},${y}`;
-const quota = () => QUOTAS[S.round];
-const isAudit = () => AUDIT.includes(S.round);
+const seed = () => (Math.random() * 4294967296) >>> 0;
 
-function rand() {
-  S.rngSeed = (S.rngSeed * 1664525 + 1013904223) >>> 0;
-  return S.rngSeed / 4294967296;
+/** Run a command against the core; the returned state is the new truth. */
+function cmd(len: number): boolean {
+  const s = read<State>(len);
+  const ok = s.err === null;
+  if (!ok) toast(s.err!);
+  G = s;
+  return ok;
 }
 
-// The Vault starts bolted to the east edge, as in the design doc.
-S.cells.set(key(W - 1, 3), { x: W - 1, y: 3, t: "vault" });
+const at = (x: number, y: number) => G.board.find((p) => p.x === x && p.y === y);
 
 // ── canvas ───────────────────────────────────────────────────────────────────
 const cv = document.getElementById("cv") as HTMLCanvasElement;
 const ctx = cv.getContext("2d")!;
-let TILE = 54, OX = 0, OY = 0;
+let TILE = 54;
 
 function layout() {
   const stage = document.getElementById("stage")!;
   const r = stage.getBoundingClientRect();
+  const [W, H] = [G.boardW, G.boardH];
   TILE = Math.max(26, Math.floor(Math.min((r.width - 24) / W, (r.height - 24) / H)));
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   cv.width = W * TILE * dpr;
@@ -89,7 +135,6 @@ function layout() {
   cv.style.width = W * TILE + "px";
   cv.style.height = H * TILE + "px";
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  OX = 0; OY = 0;
 }
 
 function rr(x: number, y: number, w: number, h: number, r: number) {
@@ -116,6 +161,7 @@ function arrow(cx: number, cy: number, d: Dir, len: number, col: string) {
 }
 
 function draw() {
+  const [W, H] = [G.boardW, G.boardH];
   ctx.clearRect(0, 0, cv.width, cv.height);
 
   // floor
@@ -123,35 +169,26 @@ function draw() {
     ctx.fillStyle = "#151a22";
     ctx.strokeStyle = "#222b36";
     ctx.lineWidth = 1;
-    rr(OX + x * TILE + 1.5, OY + y * TILE + 1.5, TILE - 3, TILE - 3, 5);
+    rr(x * TILE + 1.5, y * TILE + 1.5, TILE - 3, TILE - 3, 5);
     ctx.fill(); ctx.stroke();
   }
 
-  // aura halos, under machines
-  for (const c of S.cells.values()) {
-    const def = DEFS[c.t];
-    if (!def?.aura) continue;
-    for (const d of Object.keys(DIRV) as Dir[]) {
-      const [dx, dy] = DIRV[d];
-      const n = S.cells.get(key(c.x + dx, c.y + dy));
-      if (!n) continue;
-      if (def.aura.onlyTag && !DEFS[n.t].tags.includes(def.aura.onlyTag)) continue;
-      ctx.strokeStyle = CAT.modifier;
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([4, 3]);
-      rr(OX + n.x * TILE + 3, OY + n.y * TILE + 3, TILE - 6, TILE - 6, 6);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
+  // aura halos (targets computed by the core), under machines
+  for (const a of G.auras) {
+    ctx.strokeStyle = CAT.modifier;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    rr(a.x * TILE + 3, a.y * TILE + 3, TILE - 6, TILE - 6, 6);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   // machines
-  for (const c of S.cells.values()) {
-    const def = DEFS[c.t];
-    const col = CAT[def.kind];
-    const cx = OX + c.x * TILE + TILE / 2, cy = OY + c.y * TILE + TILE / 2;
+  for (const c of G.board) {
+    const col = CAT[c.kind];
+    const cx = c.x * TILE + TILE / 2, cy = c.y * TILE + TILE / 2;
 
-    if (c.t === "belt" || c.t === "merger") {
+    if (c.m === "belt" || c.m === "merger") {
       ctx.strokeStyle = "#3a4655";
       ctx.lineWidth = Math.max(6, TILE * 0.17);
       ctx.lineCap = "round";
@@ -161,7 +198,7 @@ function draw() {
       ctx.lineTo(cx + ox * (TILE / 2 - 3), cy + oy * (TILE / 2 - 3));
       ctx.stroke();
       arrow(cx, cy, c.d!, TILE / 2 - 9, "#8ea1b8");
-      if (c.t === "merger") {
+      if (c.m === "merger") {
         ctx.fillStyle = "#8ea1b8";
         ctx.font = `700 ${Math.max(7, TILE * 0.18)}px ui-monospace,monospace`;
         ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -170,176 +207,175 @@ function draw() {
     } else {
       ctx.fillStyle = col;
       ctx.globalAlpha = 0.92;
-      rr(OX + c.x * TILE + 4, OY + c.y * TILE + 4, TILE - 8, TILE - 8, 6);
+      rr(c.x * TILE + 4, c.y * TILE + 4, TILE - 8, TILE - 8, 6);
       ctx.fill();
       ctx.globalAlpha = 1;
 
-      if (S.selected === key(c.x, c.y)) {
+      if (ui.selected && ui.selected.x === c.x && ui.selected.y === c.y) {
         ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
-        rr(OX + c.x * TILE + 1.5, OY + c.y * TILE + 1.5, TILE - 3, TILE - 3, 7);
+        rr(c.x * TILE + 1.5, c.y * TILE + 1.5, TILE - 3, TILE - 3, 7);
         ctx.stroke();
       }
 
       ctx.fillStyle = "#0b0e13";
       ctx.font = `700 ${Math.max(8, TILE * 0.21)}px ui-monospace,monospace`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(SHORT[c.t] ?? "", cx, cy);
+      ctx.fillText(SHORT[c.m] ?? "", cx, cy);
 
-      if (c.d && def.kind !== "modifier" && def.kind !== "vault") arrow(cx, cy, c.d, TILE / 2 - 4, col);
+      if (c.d && c.kind !== "modifier" && c.kind !== "vault") arrow(cx, cy, c.d, TILE / 2 - 4, col);
       if (c.d2) arrow(cx, cy, c.d2, TILE / 2 - 4, "#ffffff88");
 
-      if (c.t === "filter") {
+      if (c.m === "filter") {
         ctx.fillStyle = "#0b0e13";
         ctx.font = `700 ${Math.max(7, TILE * 0.16)}px ui-monospace,monospace`;
-        ctx.fillText("≥" + (c.cfg?.minQuality ?? 5), cx, cy + TILE * 0.26);
+        ctx.fillText("≥" + (c.minQ ?? "?"), cx, cy + TILE * 0.26);
       }
     }
   }
 
-  // items
-  if (S.sim) {
-    for (const p of S.positions.values()) {
-      const x = p.px + (p.x - p.px) * S.alpha;
-      const y = p.py + (p.y - p.py) * S.alpha;
-      const cx = OX + x * TILE + TILE / 2, cy = OY + y * TILE + TILE / 2;
-      const r = Math.max(3.5, TILE * 0.11);
-      ctx.fillStyle = ITEM_COLOR[p.item.type] ?? "#fff";
-      ctx.strokeStyle = "#0b0e13";
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      if (p.item.quality > 0) {
-        ctx.fillStyle = "#fff";
-        ctx.font = `700 ${Math.max(7, TILE * 0.15)}px ui-monospace,monospace`;
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(String(p.item.quality), cx, cy - r - Math.max(5, TILE * 0.13));
-      }
+  // items in flight
+  for (const p of ui.positions.values()) {
+    const x = p.px + (p.x - p.px) * ui.alpha;
+    const y = p.py + (p.y - p.py) * ui.alpha;
+    const cx = x * TILE + TILE / 2, cy = y * TILE + TILE / 2;
+    const r = Math.max(3.5, TILE * 0.11);
+    ctx.fillStyle = ITEM_COLOR[p.t] ?? "#fff";
+    ctx.strokeStyle = "#0b0e13";
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    if (p.q > 0) {
+      ctx.fillStyle = "#fff";
+      ctx.font = `700 ${Math.max(7, TILE * 0.15)}px ui-monospace,monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(String(p.q), cx, cy - r - Math.max(5, TILE * 0.13));
     }
   }
 
-  // ghost of the tool under the cursor
-  if (S.phase === "build" && hover && !S.cells.has(key(hover.x, hover.y))) {
-    const def = DEFS[S.tool];
-    ctx.globalAlpha = 0.32;
-    ctx.fillStyle = CAT[def.kind];
-    rr(OX + hover.x * TILE + 4, OY + hover.y * TILE + 4, TILE - 8, TILE - 8, 6);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-    ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 1.5;
-    rr(OX + hover.x * TILE + 2, OY + hover.y * TILE + 2, TILE - 4, TILE - 4, 7);
-    ctx.stroke();
+  // ghost of the pending placement under the cursor
+  if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y)) {
+    const kind = ui.tool.kind === "belt" ? "logistics" : G.hand[ui.tool.idx]?.kind;
+    if (kind) {
+      ctx.globalAlpha = 0.32;
+      ctx.fillStyle = CAT[kind];
+      rr(hover.x * TILE + 4, hover.y * TILE + 4, TILE - 8, TILE - 8, 6);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 1.5;
+      rr(hover.x * TILE + 2, hover.y * TILE + 2, TILE - 4, TILE - 4, 7);
+      ctx.stroke();
+    }
   }
 }
 
 // ── placement ────────────────────────────────────────────────────────────────
-function cost(t: string) { return DEFS[t].cost; }
-
-function place(x: number, y: number, t: string, d: Dir) {
-  if (x < 0 || y < 0 || x >= W || y >= H) return false;
-  if (S.cells.has(key(x, y))) return false;
-  if (S.credits < cost(t)) return false;
-  S.credits -= cost(t);
-  const c: Cell = { x, y, t, d };
-  if (t === "filter") { c.d2 = turn(d, 1); c.cfg = { minQuality: 5 }; }
-  if (t === "splitter") { c.d2 = turn(d, 1); }
-  S.cells.set(key(x, y), c);
-  return true;
+function placeAt(x: number, y: number, d: Dir) {
+  if (ui.tool.kind === "belt") {
+    cmd(core.belt(x, y, DCODE[d]));
+    return;
+  }
+  const card = G.hand[ui.tool.idx];
+  if (!card) return;
+  // Filters eject sideways by default; splitters split sideways. The core
+  // validates — these are just sensible initial edges the player can rotate.
+  const d2 = card.m === "filter" || card.m === "splitter" ? turn(d) : null;
+  const minQ = card.m === "filter" ? 5 : -1;
+  if (cmd(core.play(ui.tool.idx, x, y, DCODE[d], dc(d2), minQ))) {
+    ui.tool = { kind: "belt" }; // the card is consumed; drop back to belts
+  }
 }
 
-function remove(x: number, y: number) {
-  const k = key(x, y);
-  const c = S.cells.get(k);
-  if (!c || c.t === "vault") return;
-  S.credits += cost(c.t);          // full refund during build: experimenting is free
-  S.cells.delete(k);
-  if (S.selected === k) S.selected = null;
-}
-
-const ORDER: Dir[] = ["N", "E", "S", "W"];
-function turn(d: Dir, n: number): Dir {
-  return ORDER[(ORDER.indexOf(d) + n + 4) % 4];
-}
-
-// ── projection (the preview sim from the design doc) ──────────────────────────
-function project() {
-  const cells = [...S.cells.values()];
-  const r = new Sim(W, H, cells, 1).run(SHIFT(S.round));
-  (document.getElementById("pProj") as HTMLElement).textContent = r.payout.toLocaleString();
-  (document.getElementById("pQuota") as HTMLElement).textContent = quota().toLocaleString();
-  (document.getElementById("pFlight") as HTMLElement).textContent = String(r.inFlight);
-  (document.getElementById("pJam") as HTMLElement).textContent = String(r.jamTicks);
-  const bar = document.getElementById("pBar") as HTMLElement;
-  const pct = Math.min(100, (r.payout / quota()) * 100);
-  bar.style.width = pct + "%";
-  bar.className = r.payout >= quota() ? "" : "short";
-  return r;
-}
-
-// ── UI ───────────────────────────────────────────────────────────────────────
-function paintPalette() {
+// ── side panel ───────────────────────────────────────────────────────────────
+function paintHand() {
   const pal = document.getElementById("pal")!;
   pal.innerHTML = "";
-  const list = [...S.unlocked].sort((a, b) => cost(a) - cost(b));
-  list.forEach((t) => {
-    const def = DEFS[t];
+
+  const beltEl = document.createElement("div");
+  beltEl.className = "pi" + (ui.tool.kind === "belt" ? " on" : "") + (G.credits >= 1 ? "" : " no");
+  beltEl.innerHTML =
+    `<div class="sw" style="background:${CAT.logistics}">▸</div>` +
+    `<div class="nm">Belt</div><div class="cs">1c</div>`;
+  beltEl.onclick = () => { ui.tool = { kind: "belt" }; ui.selected = null; paintAll(); };
+  pal.appendChild(beltEl);
+
+  G.hand.forEach((card, i) => {
     const el = document.createElement("div");
-    const afford = S.credits >= def.cost;
-    el.className = "pi" + (S.tool === t ? " on" : "") + (afford ? "" : " no");
+    const afford = G.credits >= card.cost;
+    const on = ui.tool.kind === "card" && ui.tool.idx === i;
+    el.className = "pi" + (on ? " on" : "") + (afford ? "" : " no");
     el.innerHTML =
-      `<div class="sw" style="background:${CAT[def.kind]}">${SHORT[t] || "▸"}</div>` +
-      `<div class="nm">${def.name}</div><div class="cs">${def.cost}c</div>`;
-    el.onclick = () => { S.tool = t; S.selected = null; paintAll(); };
+      `<div class="sw" style="background:${CAT[card.kind]}">${SHORT[card.m] || "▸"}</div>` +
+      `<div class="nm">${card.name}</div><div class="cs">${card.cost}c</div>`;
+    el.onclick = () => { ui.tool = { kind: "card", idx: i }; ui.selected = null; paintAll(); };
     pal.appendChild(el);
   });
+
+  (document.getElementById("deckInfo") as HTMLElement).textContent =
+    `deck ${G.deckDraw} · discard ${G.deckDiscard}`;
 }
 
 function paintInspector() {
   const box = document.getElementById("insp")!;
   const body = document.getElementById("inspBody")!;
-  const c = S.selected ? S.cells.get(S.selected) : null;
-  if (!c || (c.t !== "filter" && c.t !== "splitter")) { box.classList.remove("on"); return; }
+  const c = ui.selected ? at(ui.selected.x, ui.selected.y) : null;
+  if (!c || (c.m !== "filter" && c.m !== "splitter")) { box.classList.remove("on"); return; }
   box.classList.add("on");
-  if (c.t === "filter") {
+  if (c.m === "filter") {
     body.innerHTML =
-      `<div class="kv"><span>Eject when quality ≥</span><b>${c.cfg?.minQuality ?? 5}</b></div>
+      `<div class="kv"><span>Eject when quality ≥</span><b>${c.minQ ?? "?"}</b></div>
        <div class="row" style="margin-top:8px">
          <button id="qDown">− gate</button><button id="qUp">+ gate</button>
          <button id="dRot">turn eject</button>
        </div>
        <div id="hint" style="margin-top:9px">Items below the gate carry on round the loop.
          Higher gate = more laps = more value per item, but fewer items get out.</div>`;
-    (document.getElementById("qUp") as HTMLElement).onclick = () => {
-      c.cfg = { minQuality: Math.min(10, (c.cfg?.minQuality ?? 5) + 1) }; paintAll();
-    };
-    (document.getElementById("qDown") as HTMLElement).onclick = () => {
-      c.cfg = { minQuality: Math.max(0, (c.cfg?.minQuality ?? 5) - 1) }; paintAll();
-    };
-    (document.getElementById("dRot") as HTMLElement).onclick = () => {
-      c.d2 = turn(c.d2 ?? "N", 1); paintAll();
-    };
+    (document.getElementById("qUp") as HTMLElement).onclick =
+      () => { cmd(core.set_gate(c.x, c.y, (c.minQ ?? 5) + 1)); paintAll(); };
+    (document.getElementById("qDown") as HTMLElement).onclick =
+      () => { cmd(core.set_gate(c.x, c.y, (c.minQ ?? 5) - 1)); paintAll(); };
+    (document.getElementById("dRot") as HTMLElement).onclick =
+      () => { cmd(core.rotate2(c.x, c.y)); paintAll(); };
   } else {
     body.innerHTML = `<div class="kv"><span>Second output</span><b>${c.d2}</b></div>
       <div class="row" style="margin-top:8px"><button id="dRot">turn 2nd output</button></div>`;
-    (document.getElementById("dRot") as HTMLElement).onclick = () => {
-      c.d2 = turn(c.d2 ?? "N", 1); paintAll();
-    };
+    (document.getElementById("dRot") as HTMLElement).onclick =
+      () => { cmd(core.rotate2(c.x, c.y)); paintAll(); };
   }
 }
 
-function paintHeader(tick = 0, payout = 0) {
+function project() {
+  const r = read<{ payout?: number; inFlight?: number; jamTicks?: number; err?: string }>(core.project());
+  if (r.err !== undefined) return;
+  (document.getElementById("pProj") as HTMLElement).textContent = r.payout!.toLocaleString();
+  (document.getElementById("pQuota") as HTMLElement).textContent = G.quota.toLocaleString();
+  (document.getElementById("pFlight") as HTMLElement).textContent = String(r.inFlight);
+  (document.getElementById("pJam") as HTMLElement).textContent = String(r.jamTicks);
+  const bar = document.getElementById("pBar") as HTMLElement;
+  bar.style.width = Math.min(100, (r.payout! / G.quota) * 100) + "%";
+  bar.className = r.payout! >= G.quota ? "" : "short";
+}
+
+function paintHeader() {
   const g = (id: string) => document.getElementById(id) as HTMLElement;
-  g("hRound").textContent = String(S.round + 1) + (isAudit() ? " ⚠" : "");
-  g("hQuota").textContent = quota().toLocaleString();
-  g("hCred").textContent = String(Math.floor(S.credits));
-  g("hTick").textContent = `${tick}/${SHIFT(S.round)}`;
-  g("hPay").textContent = payout.toLocaleString();
+  g("hRound").textContent = String(G.round + 1) + (G.audit ? " ⚠" : "");
+  g("hQuota").textContent = G.quota.toLocaleString();
+  g("hCred").textContent = String(G.credits);
+  g("hTick").textContent = `${ui.tick}/${G.shiftLen}`;
+  g("hPay").textContent = ui.payout.toLocaleString();
 }
 
 function paintAll() {
-  paintPalette();
+  paintHand();
   paintInspector();
-  paintHeader(S.sim?.tick ?? 0, S.sim?.result().payout ?? 0);
-  if (S.phase === "build") project();
+  paintHeader();
+  if (G.phase === "build" && !ui.animating) project();
   draw();
+}
+
+function toast(msg: string) {
+  const el = document.getElementById("toast")!;
+  el.textContent = msg;
+  el.classList.add("on");
+  setTimeout(() => el.classList.remove("on"), 1800);
 }
 
 // ── input ────────────────────────────────────────────────────────────────────
@@ -351,50 +387,59 @@ function toTile(ev: MouseEvent | Touch) {
   const r = cv.getBoundingClientRect();
   const x = Math.floor((ev.clientX - r.left) / TILE);
   const y = Math.floor((ev.clientY - r.top) / TILE);
-  return x >= 0 && y >= 0 && x < W && y < H ? { x, y } : null;
+  return x >= 0 && y >= 0 && x < G.boardW && y < G.boardH ? { x, y } : null;
 }
 
 function commitDrag() {
-  // Lay a belt run along the dragged path, auto-orienting each tile toward the next.
+  // Lay a belt run along the dragged path, auto-orienting each tile toward
+  // the next. Refusals (occupied tiles, empty wallet) surface as toasts.
   for (let i = 0; i < dragPath.length; i++) {
     const a = dragPath[i], b = dragPath[i + 1];
-    let d: Dir = S.dir;
+    let d: Dir = ui.dir;
     if (b) {
       d = b.x > a.x ? "E" : b.x < a.x ? "W" : b.y > a.y ? "S" : "N";
     } else if (i > 0) {
       const p = dragPath[i - 1];
       d = a.x > p.x ? "E" : a.x < p.x ? "W" : a.y > p.y ? "S" : "N";
     }
-    place(a.x, a.y, S.tool, d);
+    if (!at(a.x, a.y)) cmd(core.belt(a.x, a.y, DCODE[d]));
   }
   dragPath = [];
 }
 
+const buildLocked = () => G.phase !== "build" || ui.animating;
+
 cv.addEventListener("contextmenu", (e) => e.preventDefault());
 
 cv.addEventListener("pointerdown", (e) => {
-  if (S.phase !== "build") return;
+  if (buildLocked()) return;
   const t = toTile(e);
   if (!t) return;
   cv.setPointerCapture(e.pointerId);
 
-  if (e.button === 2) { remove(t.x, t.y); paintAll(); return; }
+  if (e.button === 2) { cmd(core.sell(t.x, t.y)); paintAll(); return; }
 
-  const existing = S.cells.get(key(t.x, t.y));
+  const existing = at(t.x, t.y);
   if (existing) {
-    if (existing.t === "vault") return;
-    // clicking a placed machine selects it and rotates it
-    if (S.selected === key(t.x, t.y)) existing.d = turn(existing.d ?? "E", 1);
-    S.selected = key(t.x, t.y);
-    S.dir = existing.d ?? "E";
+    if (existing.m === "vault") return;
+    // clicking a placed machine selects it; clicking again rotates it
+    if (ui.selected && ui.selected.x === t.x && ui.selected.y === t.y) {
+      cmd(core.rotate(t.x, t.y));
+    }
+    ui.selected = { x: t.x, y: t.y };
+    const now = at(t.x, t.y);
+    if (now?.d) ui.dir = now.d;
     paintAll();
     return;
   }
 
-  S.selected = null;
-  dragging = true;
-  dragPath = [t];
-  if (S.tool !== "belt") { place(t.x, t.y, S.tool, S.dir); dragging = false; dragPath = []; }
+  ui.selected = null;
+  if (ui.tool.kind === "belt") {
+    dragging = true;
+    dragPath = [t];
+  } else {
+    placeAt(t.x, t.y, ui.dir);
+  }
   paintAll();
 });
 
@@ -416,84 +461,85 @@ cv.addEventListener("pointerup", () => {
 });
 
 window.addEventListener("keydown", (e) => {
+  if (buildLocked()) {
+    if (e.key === " ") e.preventDefault();
+    return;
+  }
   if (e.key === "r" || e.key === "R") {
-    if (S.selected) {
-      const c = S.cells.get(S.selected)!;
-      c.d = turn(c.d ?? "E", 1);
-    } else S.dir = turn(S.dir, 1);
+    if (ui.selected) cmd(core.rotate(ui.selected.x, ui.selected.y));
+    else ui.dir = turn(ui.dir);
     paintAll();
   }
+  if (e.key === "b" || e.key === "B") { ui.tool = { kind: "belt" }; paintAll(); }
   if (e.key === " ") { e.preventDefault(); runShift(); }
   const n = parseInt(e.key, 10);
-  if (n >= 1 && n <= 9) {
-    const list = [...S.unlocked].sort((a, b) => cost(a) - cost(b));
-    if (list[n - 1]) { S.tool = list[n - 1]; paintAll(); }
+  if (n >= 1 && n <= 9 && G.hand[n - 1]) {
+    ui.tool = { kind: "card", idx: n - 1 };
+    paintAll();
   }
 });
 
-// ── shift ────────────────────────────────────────────────────────────────────
+// ── the shift ────────────────────────────────────────────────────────────────
 let raf = 0, acc = 0, last = 0;
 
 function runShift() {
-  if (S.phase !== "build") return;
-  S.phase = "shift";
-  S.sim = new Sim(W, H, [...S.cells.values()], 1);
-  S.positions.clear();
+  if (buildLocked()) return;
+  if (!cmd(core.shift_start())) return;
+  ui.animating = true;
+  ui.positions.clear();
+  ui.tick = 0;
+  ui.payout = 0;
   (document.getElementById("bRun") as HTMLButtonElement).disabled = true;
   last = performance.now();
   acc = 0;
-  raf = requestAnimationFrame(frame);
+  raf = requestAnimationFrame(frameLoop);
 }
 
-function snapshot() {
-  const sim = S.sim!;
-  const prev = new Map(S.positions);
-  S.positions.clear();
-  const moved = new Map<number, number>();
-  for (const m of sim.moves) moved.set(m.id, m.from);
-
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const v = sim.view(x, y);
-    if (!v.out) continue;
-    const from = moved.get(v.out.id);
-    let px = x, py = y;
-    if (from !== undefined) { px = from % W; py = Math.floor(from / W); }
-    else { const old = prev.get(v.out.id); if (old) { px = old.x; py = old.y; } }
-    S.positions.set(v.out.id, { x, y, px, py, item: v.out });
+function applyFrame(f: Frame) {
+  const prev = new Map(ui.positions);
+  ui.positions.clear();
+  const from = new Map(f.moves.map((m) => [m.id, m]));
+  for (const it of f.items) {
+    const m = from.get(it.id);
+    const old = prev.get(it.id);
+    const px = m ? m.fx : old ? old.x : it.x;
+    const py = m ? m.fy : old ? old.y : it.y;
+    ui.positions.set(it.id, { x: it.x, y: it.y, px, py, t: it.t, q: it.q });
   }
+  ui.tick = f.tick;
+  ui.payout = f.payout;
 }
 
-function frame(now: number) {
-  const sim = S.sim!;
-  const total = SHIFT(S.round);
-  const msPerTick = 1000 / (7 * S.speed);
+function frameLoop(now: number) {
+  const msPerTick = 1000 / (7 * ui.speed);
   acc += Math.min(now - last, 200);
   last = now;
 
-  while (acc >= msPerTick && sim.tick < total) {
+  let done = false;
+  while (acc >= msPerTick && !done) {
     acc -= msPerTick;
-    sim.step();
-    snapshot();
+    const f = read<Frame>(core.shift_step());
+    applyFrame(f);
+    done = f.done;
   }
-  S.alpha = Math.min(1, acc / msPerTick);
+  ui.alpha = Math.min(1, acc / msPerTick);
 
-  paintHeader(sim.tick, sim.result().payout);
+  paintHeader();
   draw();
 
-  if (sim.tick >= total) { endShift(); return; }
-  raf = requestAnimationFrame(frame);
+  if (done) { endShift(); return; }
+  raf = requestAnimationFrame(frameLoop);
 }
 
 function endShift() {
   cancelAnimationFrame(raf);
-  const r = S.sim!.result(SHIFT(S.round));
-  const passed = r.payout >= quota();
-  if (!passed) return gameOver(r.payout);
-
-  S.credits += r.payout - quota();
-  S.round++;
-  if (S.round >= QUOTAS.length) return victory();
-  offerUnlock(r);
+  ui.animating = false;
+  ui.positions.clear();
+  (document.getElementById("bRun") as HTMLButtonElement).disabled = false;
+  cmd(core.shift_finish());
+  if (G.phase === "reward") offerRewards();
+  else if (G.phase === "over") G.won ? victory() : gameOver();
+  paintAll();
 }
 
 // ── modals ───────────────────────────────────────────────────────────────────
@@ -504,91 +550,95 @@ function modal(html: string) {
 }
 function closeModal() { document.getElementById("modal")!.classList.remove("on"); }
 
-function offerUnlock(r: { payout: number; inFlight: number }) {
-  const locked = UNLOCK_POOL.filter((t) => !S.unlocked.has(t));
-  const picks: string[] = [];
-  while (picks.length < 3 && locked.length) {
-    picks.push(locked.splice(Math.floor(rand() * locked.length), 1)[0]);
-  }
-  const surplus = r.payout - QUOTAS[S.round - 1];
+function offerRewards() {
+  const o = G.last!;
+  const surplus = o.payout - o.quota;
   modal(
     `<h3>Shift complete</h3>
-     <p>Delivered <b style="color:var(--vault)">${r.payout.toLocaleString()}</b> against a quota of
-        ${QUOTAS[S.round - 1].toLocaleString()}. Surplus of ${surplus.toLocaleString()} banked —
-        you now have <b>${Math.floor(S.credits)}</b> credits.
-        ${r.inFlight} items were still on belts and were forfeit.</p>
-     <p style="margin-bottom:10px"><b>Round ${S.round + 1}</b> needs
-        <b style="color:var(--extractor)">${quota().toLocaleString()}</b>${isAudit()
+     <p>Delivered <b style="color:var(--vault)">${o.payout.toLocaleString()}</b> against a quota of
+        ${o.quota.toLocaleString()}. Surplus of ${surplus.toLocaleString()} banked —
+        you now have <b>${G.credits}</b> credits.
+        ${o.inFlight} items were still on belts and were forfeit.</p>
+     <p style="margin-bottom:10px"><b>Round ${G.round + 1}</b> needs
+        <b style="color:var(--extractor)">${G.quota.toLocaleString()}</b>${G.audit
           ? ` — and it's an <b style="color:var(--processor)">AUDIT</b>.`
-          : "."} Pick one machine to unlock:</p>
-     <div class="offers">${picks.map((t, i) => {
-       const d = DEFS[t];
-       return `<div class="off" data-i="${i}">
-         <div class="sw" style="background:${CAT[d.kind]}">${SHORT[t] || "▸"}</div>
-         <div class="nm">${d.name}</div>
-         <div class="ds">${d.cost}c · ${d.tags.join(" ") || "logistics"}</div></div>`;
-     }).join("")}</div>` + (picks.length ? "" : `<button class="go" data-i="-1">Continue</button>`),
+          : "."} Add one blueprint card to your deck:</p>
+     <div class="offers">${G.offers.map((c, i) =>
+       `<div class="off" data-i="${i}">
+         <div class="sw" style="background:${CAT[c.kind]}">${SHORT[c.m] || "▸"}</div>
+         <div class="nm">${c.name}</div>
+         <div class="ds">${c.cost}c · ${c.kind}</div></div>`).join("")}</div>
+     <button data-i="-1" style="width:100%">Skip — keep the deck lean</button>`,
   );
   document.querySelectorAll<HTMLElement>("[data-i]").forEach((el) => {
     el.onclick = () => {
-      const i = +el.dataset.i!;
-      if (i >= 0) S.unlocked.add(picks[i]);
+      cmd(core.pick_reward(+el.dataset.i!));
       closeModal();
-      S.phase = "build";
-      S.sim = null;
-      S.positions.clear();
-      (document.getElementById("bRun") as HTMLButtonElement).disabled = false;
       paintAll();
     };
   });
 }
 
-function gameOver(payout: number) {
-  S.phase = "over";
+function gameOver() {
+  const o = G.last!;
   modal(
     `<h3>Quota missed</h3>
-     <p>You delivered <b style="color:var(--processor)">${payout.toLocaleString()}</b> against
-        <b>${quota().toLocaleString()}</b> on round ${S.round + 1}. The contract is terminated.</p>
+     <p>You delivered <b style="color:var(--processor)">${o.payout.toLocaleString()}</b> against
+        <b>${o.quota.toLocaleString()}</b> on round ${o.round + 1}. The contract is terminated.</p>
      <button class="go" id="again">New run</button>`,
   );
-  (document.getElementById("again") as HTMLElement).onclick = () => location.reload();
+  (document.getElementById("again") as HTMLElement).onclick = newRun;
 }
 
 function victory() {
-  S.phase = "over";
   modal(
     `<h3>Run complete</h3>
      <p>All twelve rounds cleared, final audit included. That's the whole arc —
         and if this was fun, the design is worth building properly.</p>
      <button class="go" id="again">Run it again</button>`,
   );
-  (document.getElementById("again") as HTMLElement).onclick = () => location.reload();
+  (document.getElementById("again") as HTMLElement).onclick = newRun;
+}
+
+function newRun() {
+  cmd(core.boot(seed()));
+  ui.tool = { kind: "belt" };
+  ui.selected = null;
+  ui.tick = 0;
+  ui.payout = 0;
+  closeModal();
+  paintAll();
 }
 
 // ── boot ─────────────────────────────────────────────────────────────────────
 (document.getElementById("bRun") as HTMLElement).onclick = runShift;
 (document.getElementById("bSpeed") as HTMLElement).onclick = (e) => {
-  S.speed = S.speed === 1 ? 4 : S.speed === 4 ? 16 : 1;
-  (e.target as HTMLElement).textContent = `Speed ${S.speed}×`;
+  ui.speed = ui.speed === 1 ? 4 : ui.speed === 4 ? 16 : 1;
+  (e.target as HTMLElement).textContent = `Speed ${ui.speed}×`;
 };
 (document.getElementById("bReset") as HTMLElement).onclick = () => {
-  if (S.phase !== "build") return;
-  for (const c of [...S.cells.values()]) if (c.t !== "vault") remove(c.x, c.y);
+  if (buildLocked()) return;
+  for (const c of [...G.board]) if (c.m !== "vault") cmd(core.sell(c.x, c.y));
   paintAll();
 };
 
 window.addEventListener("resize", () => { layout(); draw(); });
+
+cmd(core.boot(seed()));
 layout();
 paintAll();
 
 modal(
   `<h3>OVERFLOW</h3>
-   <p>Place machines on the grid, route items into the <b style="color:var(--vault)">Vault</b>,
-      and beat the quota in 60 ticks. Surplus becomes credits; credits buy more machines.
-      Twelve rounds, quota nearly doubling each time.</p>
+   <p>Your run is a <b>deck of blueprint cards</b>. Each round deals you a hand —
+      you can only place what you were dealt. Belts are always available for 1 credit.
+      Route items into the <b style="color:var(--vault)">Vault</b> and beat the quota
+      in ${G.shiftLen} ticks; surplus becomes credits, and each cleared shift adds
+      one card of your choice to the deck.</p>
    <p>Start simple: a <b>Drill</b>, a run of <b>Belt</b> dragged toward the Vault, and a
       <b>Furnace</b> in the middle to turn Ore into Ingots. Watch the projection panel —
-      it runs the whole shift for you before you commit.</p>
+      it runs the whole shift for you before you commit. Placed machines are consumed
+      from the deck; selling one (right-click) refunds it back.</p>
    <button class="go" id="start">Start shift 1</button>`,
 );
 (document.getElementById("start") as HTMLElement).onclick = closeModal;

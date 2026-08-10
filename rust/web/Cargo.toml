@@ -1,0 +1,13 @@
+[package]
+name = "overflow-web"
+version = "0.1.0"
+edition.workspace = true
+description = "Browser bridge for overflow-core: a hand-rolled wasm ABI (scalars in, JSON out). Deliberately no wasm-bindgen — the surface is small enough that plain exports keep the toolchain to `cargo build` alone."
+
+[lib]
+# cdylib is the wasm artifact; rlib lets host-target integration tests drive
+# the exact ABI the browser will.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+overflow-core = { path = "../core" }

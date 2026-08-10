@@ -1,9 +1,14 @@
-name: Deploy design doc to Pages
+name: Deploy design doc + playable build to Pages
 
 on:
   push:
     branches: [main]
-    paths: ["docs/**", "prototype/**", "sim/**", ".github/workflows/pages.yml"]
+    paths:
+      - "docs/**"
+      - "prototype/**"
+      - "rust/**"
+      - "package.json"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,13 +29,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The playable prototype is built here rather than committed, so the
-      # deployed bundle can never drift from the tested sim it imports.
+      # The playable build is compiled here rather than committed, so the
+      # deployed bundle can never drift from the tested core it wraps:
+      # rust/core -> rust/web -> game.wasm, plus the canvas shell.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: oven-sh/setup-bun@v2
-      - run: |
-          mkdir -p docs/play
-          bun build prototype/game.ts --outfile docs/play/game.js --target browser --minify
-          cp prototype/index.html docs/play/index.html
+      - run: bun run build:play
+
+      # Gate the deploy on the harness actually playing a round against the
+      # exact wasm bytes about to ship.
+      - run: bun run test:play
 
       # NOTE: this step fails until Pages is enabled ONCE for the repo, at
       # Settings -> Pages -> Source: "GitHub Actions". It cannot self-enable:

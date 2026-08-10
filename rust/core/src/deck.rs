@@ -56,6 +56,16 @@ impl Deck {
         self.draw.len() + self.discard.len()
     }
 
+    /// Cards left in the draw pile — a UI shows this next to the hand.
+    pub fn draw_count(&self) -> usize {
+        self.draw.len()
+    }
+
+    /// Cards in the discard, waiting to be reshuffled in.
+    pub fn discard_count(&self) -> usize {
+        self.discard.len()
+    }
+
     /// Draw up to `n` cards. When the draw pile empties, the discard is
     /// shuffled in — so consumed (placed) machines are genuinely gone, but
     /// unplayed and refunded cards keep cycling.

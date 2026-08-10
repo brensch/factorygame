@@ -8,20 +8,25 @@ surplus on machines and relics. The quota steps ~1.8× per round; adding another
 1.3×. So the game forces you off addition and onto multipliers — adjacency auras, tag resonance,
 and closed belt loops that circulate items through Polishers until they qualify to leave.
 
-## 🎮 Play the prototype
+## 🎮 Play it
 
 **→ [brensch.github.io/factorygame/play/](https://brensch.github.io/factorygame/play/)**
 
-Twelve rounds, quota nearly doubling each time. Drag to lay belts, click machines to rotate,
-right-click to remove (full refund — experimenting is free). The projection panel runs the whole
+Twelve rounds, quota nearly doubling each time — and your run is a **deck of blueprint
+cards**. Each round deals a hand; you can only place what you were dealt. Placing consumes
+the card, selling refunds it to the discard, and every cleared shift adds one card of your
+choice to the deck. Belts stay 1-credit infrastructure, always available. Drag to lay belt
+runs, click machines to rotate, right-click to sell. The projection panel runs the whole
 shift before you commit.
 
-This exists to answer one question: **is it fun?** It is not the game. It's a browser shell around
-the reference sim, deliberately built in a few hours so the design can be judged before anyone
-commits to an engine. Every rule it plays by comes from `sim/` — it contains no game logic of its
-own, so it cannot drift from the tested implementation.
+The page is a thin canvas shell over the **Rust core compiled to wasm** (~85 KB). The
+JavaScript owns rendering and input and nothing else: every rule — the tick sim, the deck,
+quotas, legality — executes inside `rust/core`, the same crate the tests pin and the lab
+bots play. The deployed bundle is built from source on every push, so it cannot drift from
+the tested implementation.
 
-Build it locally with `cd sim && bun run build:play && bun run serve`.
+Build it locally: `bun run build:play && bun run serve` (needs Rust with the
+`wasm32-unknown-unknown` target, and bun).
 
 ## 📄 The design document
 
@@ -32,26 +37,7 @@ It's a single self-contained HTML file: no build step, no CDN.
 
 **→ [brensch.github.io/factorygame](https://brensch.github.io/factorygame/)**
 
-Deployed by `.github/workflows/pages.yml` on every change to `docs/`. The same
-pipeline will serve playable web builds later.
-
-## 🧪 The reference simulation
-
-**[`sim/`](sim/)** — the tick simulation, in TypeScript, with tests.
-
-This exists so the design document's numbers are *executable rather than asserted*. The round 1
-and round 4 boards from the walkthrough are checked in as data, and the tests assert the exact
-figures the doc quotes.
-
-```sh
-cd sim
-bun test        # 14 tests
-bun run report  # print what each walkthrough board actually delivers
-```
-
-It also proves out the one genuinely hard mechanic: a **closed belt loop rotates rather than
-deadlocking**, which is what makes the polish-loop build legal at all. See the comment on
-`transfer()` in `sim/src/sim.ts`.
+Deployed by `.github/workflows/pages.yml` on every change, together with the playable build.
 
 ## Engine
 
@@ -60,17 +46,26 @@ on-screen item counts scaling from desktop down to mobile, and the simulation th
 is where engines actually differ: GDScript measured **29× slower** than JIT'd JS on the transfer
 loop, while the Rust core below does **32,500 items in flight at 4.7 ms/tick** single-threaded.
 
-The choice is deliberately cheap to reverse: the whole game lives in an engine-free Rust crate,
-and Bevy will be a renderer over it. The load-bearing rule survives from day one: the factory is
-a pure deterministic tick simulation; the renderer reads sim state and never writes back.
+The choice stays deliberately cheap to reverse — and cheap to defer: the whole game lives in an
+engine-free Rust crate, the browser build ships **today** through an 85 KB hand-rolled wasm
+bridge, and Bevy arrives as a renderer over the identical crate once the design has proven
+it deserves one. The load-bearing rule survives from day one: the factory is a pure
+deterministic tick simulation; the renderer reads sim state and never writes back.
 
-## 🦀 The Rust core and lab
+## 🦀 The Rust workspace
 
-[`rust/`](rust/) — the canonical implementation going forward.
+[`rust/`](rust/) — the canonical implementation. Three crates:
 
-- **`core/`** — the game: the tick sim (ported 1:1 from `sim/`, pinned by the same 19 test
-  assertions to the same numbers), plus the **blueprint-card deck** and the round/run structure.
-  Zero dependencies; compiles to wasm32 unchanged, and CI enforces that it stays wasm-clean.
+- **`core/`** — the game: the deterministic tick sim, the machine and item definitions, the
+  **blueprint-card deck**, and the round/run structure. Zero dependencies; compiles to wasm32
+  unchanged, and CI enforces that it stays wasm-clean. The design doc's walkthrough boards are
+  checked in as data and the tests assert the exact figures the doc quotes — the numbers are
+  *executable rather than asserted*. That includes the one genuinely hard mechanic: a closed
+  belt loop rotates rather than deadlocking (see `transfer()` in `core/src/sim.rs`).
+- **`web/`** — the browser bridge: a hand-rolled wasm ABI (scalar arguments in, JSON state
+  out) so no binding generator sits between the game and the page. The wire format is pinned
+  by its own tests, and `prototype/harness.test.ts` plays a full round against the built
+  `game.wasm` before every deploy.
 - **`lab/`** — headless playtesting: bots play thousands of complete seeded runs and the
   outcome distribution becomes balance data.
   `cargo run --release -p overflow-lab -- --runs 2000`
@@ -78,18 +73,18 @@ a pure deterministic tick simulation; the renderer reads sim state and never wri
 First real finding from the lab: the naive lane-building bot dies at **round 4 in 2,000 of
 2,000 runs** — precisely the wall the design doc claims forces players off pure widening.
 
-The TypeScript `sim/` stays for now as the browser prototype's engine and as a cross-check —
-two independent implementations agreeing on 19 pinned numbers. It retires when the WASM build of
-the core replaces it under the same canvas UI.
+The TypeScript reference sim that bootstrapped the project is retired (git history has it).
+It ended its life as designed: two independent implementations agreeing on 19 pinned numbers,
+until the wasm build of the Rust core replaced it under the same canvas UI.
 
 ## Toolchain
 
-No editor, no IDE. Godot is a single binary and a Godot project is entirely plain text, so the
-whole loop — write, import, test, export, screenshot — runs from the command line on a headless
-box with no GPU. See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the verified commands and the honest
-limits.
+No editor, no IDE, no GPU. Build, test, a scripted browser playthrough, and screenshots all
+run from the command line on a headless box. See [`TOOLCHAIN.md`](TOOLCHAIN.md) for the
+verified commands and the honest limits.
 
 ## Status
 
-Design + reference sim + a verified headless toolchain. No game yet. See [`NOTES.md`](NOTES.md)
+Design + Rust core + playable card-game prototype in the browser, all pinned by the same
+tests. The open question is the one that matters: **is it fun?** See [`NOTES.md`](NOTES.md)
 for what's unverified and what comes next.

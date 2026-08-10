@@ -1,0 +1,10 @@
+{
+  "name": "overflow",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:play": "cargo build --release -p overflow-web --target wasm32-unknown-unknown --manifest-path rust/Cargo.toml && mkdir -p docs/play && cp rust/target/wasm32-unknown-unknown/release/overflow_web.wasm docs/play/game.wasm && bun build prototype/game.ts --outfile docs/play/game.js --target browser --minify && cp prototype/index.html docs/play/index.html",
+    "test:play": "bun test prototype/",
+    "serve": "bun run prototype/serve.ts"
+  }
+}

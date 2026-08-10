@@ -1,6 +1,6 @@
-//! The design doc's claims, as assertions — a port of the TS test suite plus
-//! deck/run coverage. If a number here disagrees with `sim/src/sim.test.ts`,
-//! one of the two implementations is wrong and the docs say which.
+//! The design doc's claims, as assertions, plus deck/run coverage. Ported
+//! from the retired TS reference suite (git history: `sim/src/sim.test.ts`);
+//! the 19 pinned numbers survived the crossing and now live only here.
 
 use overflow_core::boards::*;
 use overflow_core::deck::Deck;

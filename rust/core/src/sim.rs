@@ -1,7 +1,7 @@
-//! The tick simulation — a faithful port of the TypeScript reference sim
-//! (`sim/src/sim.ts`), which is itself pinned by tests to the design doc.
+//! The tick simulation. Ported 1:1 from the retired TypeScript reference sim
+//! (git history: `sim/src/sim.ts`) and pinned by the same test numbers.
 //!
-//! Invariants the port preserves exactly:
+//! Invariants preserved exactly:
 //!   - Pure data. No engine types, no I/O, no wall-clock time.
 //!   - Deterministic. Same board + same seed => same result, every time.
 //!   - Order-independent. Tile iteration order never affects the outcome.

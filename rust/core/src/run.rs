@@ -5,7 +5,7 @@
 //! applies them.
 
 use crate::deck::{default_unlocked, Card, Deck};
-use crate::defs::{def, Dir, Kind, MachineId};
+use crate::defs::{def, Dir, Kind, MachineId, QUALITY_CAP};
 use crate::rng::Rng;
 use crate::sim::{FilterCfg, Placement, ShiftResult, Sim};
 
@@ -14,6 +14,15 @@ pub const BOARD_H: i32 = 7;
 pub const QUOTAS: [i64; 12] = [20, 45, 90, 200, 400, 700, 1200, 2400, 4500, 8000, 14000, 30000];
 pub const HAND_SIZE: usize = 4;
 pub const STARTING_CREDITS: u32 = 15;
+
+/// Rounds flagged as audits (zero-based). Mechanically, only the final one
+/// does anything yet — it halves the shift — the rest are flagged in the UI
+/// and NOTES.md is honest about that.
+pub const AUDIT_ROUNDS: [usize; 3] = [3, 7, 11];
+
+pub fn is_audit(round: usize) -> bool {
+    AUDIT_ROUNDS.contains(&round)
+}
 
 pub fn shift_len(round: usize) -> u32 {
     if round == 11 { 30 } else { 60 } // final audit halves the shift
@@ -149,10 +158,62 @@ impl Game {
         Ok(())
     }
 
+    fn board_mut(&mut self, x: i32, y: i32) -> Result<&mut Placement, String> {
+        if self.phase != GamePhase::Build {
+            return Err("not in build phase".into());
+        }
+        self.board
+            .iter_mut()
+            .find(|p| p.x == x && p.y == y && p.m != MachineId::Vault)
+            .ok_or_else(|| format!("nothing editable at {x},{y}"))
+    }
+
+    /// Rotate a placed machine's output edge clockwise.
+    pub fn rotate(&mut self, x: i32, y: i32) -> Result<(), String> {
+        let p = self.board_mut(x, y)?;
+        match p.d {
+            Some(d) => {
+                p.d = Some(d.turn_cw());
+                Ok(())
+            }
+            None => Err("machine has no output edge".into()),
+        }
+    }
+
+    /// Rotate the secondary edge (Filter eject, Splitter second output).
+    pub fn rotate_d2(&mut self, x: i32, y: i32) -> Result<(), String> {
+        let p = self.board_mut(x, y)?;
+        match p.d2 {
+            Some(d) => {
+                p.d2 = Some(d.turn_cw());
+                Ok(())
+            }
+            None => Err("machine has no secondary edge".into()),
+        }
+    }
+
+    /// Set a Filter's quality gate.
+    pub fn set_filter_gate(&mut self, x: i32, y: i32, min_quality: i32) -> Result<(), String> {
+        let p = self.board_mut(x, y)?;
+        if p.m != MachineId::Filter {
+            return Err("not a filter".into());
+        }
+        let mut cfg = p.cfg.unwrap_or_default();
+        cfg.min_quality = Some(min_quality.clamp(0, QUALITY_CAP));
+        p.cfg = Some(cfg);
+        Ok(())
+    }
+
+    /// The shift as a steppable sim — same board, same seed as `run_shift`,
+    /// so a renderer can animate tick by tick and the committed result is
+    /// guaranteed identical.
+    pub fn shift_sim(&self) -> Result<Sim, String> {
+        Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())
+    }
+
     /// Dry-run the shift without committing — the projection panel.
     pub fn project(&self) -> Result<ShiftResult, String> {
-        let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
-        Ok(sim.run(shift_len(self.round)))
+        Ok(self.shift_sim()?.run(shift_len(self.round)))
     }
 
     /// Per-round shift seed: derived from the run seed so a run is fully
@@ -168,7 +229,7 @@ impl Game {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
         }
-        let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
+        let mut sim = self.shift_sim()?;
         let result = sim.run(shift_len(self.round));
         let quota = self.quota();
         let cleared = result.payout >= quota;

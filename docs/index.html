@@ -197,7 +197,7 @@
       <strong>compound</strong>.</p>
     <div class="chips">
       <span class="chip">2D · top-down grid</span>
-      <span class="chip">Godot 4.x</span>
+      <span class="chip">Rust core · Bevy renderer</span>
       <span class="chip">Run length ≈ 45 min</span>
       <span class="chip">12 rounds · 3 acts</span>
       <span class="chip">Deterministic seeded sim</span>
@@ -222,36 +222,35 @@
 
 <!-- ══════════════════════════ 1 ENGINE ══════════════════════════ -->
 <section id="engine">
-  <h2>1 · Engine recommendation</h2>
-  <h3>Godot 4.x, GDScript, no physics</h3>
-  <p class="lead">Godot 4 is the 2D engine I'm most confident in, and it happens to be the right
-    call for this game specifically rather than just generically.</p>
-  <p>The reasons that matter here: its 2D renderer is a first-class citizen rather than a 3D engine
-    with the Z axis switched off; the scene/node model maps cleanly onto "a tile has a machine has a
-    module"; the editor gives you a tuning loop measured in seconds; <code>Resource</code> files let you
-    define every machine, module and relic as data you can hot-edit while the game runs; and it exports
-    to desktop and web from one project with no licensing conversation.</p>
-  <p>The critical architectural point: <strong>this game has no physics and no per-item nodes.</strong>
+  <h2>1 · Engine decision</h2>
+  <h3>Rust core, Bevy renderer — decided 2026-08-10, by measurement</h3>
+  <p class="lead">The game lives in an engine-free Rust crate (<code>rust/core</code>). The browser build
+    ships today through an ~85&nbsp;KB wasm bridge under a canvas shell; Bevy arrives as a renderer over
+    the identical crate once the design has proven it deserves one.</p>
+  <p>The critical architectural point survives from the first draft of this document:
+    <strong>this game has no physics and no per-item scene objects.</strong>
     The factory is a deterministic tick simulation over a 2D array. Items are structs in a list, not
-    scene nodes. Godot draws the result; it does not own the truth. That separation is what lets you
-    run the sim at 20&nbsp;Hz, render at 144, fast-forward a shift 8× on request, replay a seed exactly,
-    and — later — evaluate a build headlessly for balance passes.</p>
+    scene nodes. The engine draws the result; it does not own the truth. That separation is what lets the
+    sim run at 20&nbsp;Hz while rendering at 144, fast-forward a shift 16× on request, replay a seed
+    exactly, and evaluate thousands of complete runs headlessly for balance passes
+    (<code>rust/lab</code> does exactly that, today).</p>
 
   <table>
-    <thead><tr><th>Option</th><th>Verdict</th><th>Why / why not</th></tr></thead>
+    <thead><tr><th>Option</th><th>Verdict</th><th>What actually happened</th></tr></thead>
     <tbody>
-      <tr><td>Godot 4.x</td><td>Recommended</td>
-        <td>Best 2D-per-unit-effort. Tilemaps, shaders, UI, particles, controller input, save/load all in the box.
-          GDScript is fast enough because the hot loop is a flat array walk, and if a late-game board with 2,000
-          items ever chokes you port just the tick function to GDExtension/C# without touching the rest.</td></tr>
-      <tr><td>TypeScript + PixiJS</td><td>Close second</td>
-        <td>This game is 80% UI, tooltips, numbers and a tick loop — all things the web is excellent at, and you already
-          have a bun toolchain. Ship a playable prototype in a URL, no installs, instant playtest feedback.
-          Loses on game feel (particles, screenshake, audio, controller) and on Steam being a chore.</td></tr>
-      <tr><td>Bevy (Rust)</td><td>Not for the first version</td>
-        <td>ECS is a genuinely good fit for tick-based factory sim and the perf ceiling is enormous. But the
-          churn tax and the UI story mean you'd spend your first month on menus. Consider it only if the design
-          proves out and you want a rewrite you'll enjoy.</td></tr>
+      <tr><td>Rust core + Bevy</td><td><strong>Chosen</strong></td>
+        <td>The game wants extreme on-screen item counts scaling down to mobile, and the sim that drives
+          them is where engines differ: the Rust core does 32,500 items in flight at 4.7&nbsp;ms/tick
+          single-threaded. The core has zero dependencies, compiles to wasm32 unchanged (CI enforces it),
+          and Bevy is strictly a renderer over it — so the choice stays cheap to reverse.</td></tr>
+      <tr><td>Godot 4.x</td><td>Was the recommendation; measured out</td>
+        <td>This section originally recommended Godot. A verified headless toolchain was built and worked
+          (see git history) — then GDScript measured <strong>29× slower</strong> than JIT'd JS on the
+          transfer loop, exactly the hot path the item-count ambition lives on.</td></tr>
+      <tr><td>TypeScript canvas</td><td>Served, then retired</td>
+        <td>The first playable prototype: a browser shell over the TS reference sim, built in hours,
+          playtestable from a URL. Retired as designed once the wasm build of the Rust core replaced it
+          under the same canvas UI.</td></tr>
       <tr><td>Unity / Unreal</td><td>No</td>
         <td>Overkill weight for a 2D grid game; you'd fight the engine's opinions more than you'd use them.</td></tr>
       <tr><td>LÖVE (Lua)</td><td>No</td>
@@ -260,11 +259,11 @@
   </table>
 
   <div class="callout teal">
-    <span class="k">Pragmatic hybrid</span>
-    <p>If you want to know whether the design is <em>fun</em> before committing: prototype the tick sim and
-      board in TS/Pixi in a weekend, because the fun is entirely in the numbers and the routing, and none of
-      it is in the rendering. Then rebuild in Godot once the loop sings. The sim is ~600 lines and porting it
-      is mechanical.</p>
+    <span class="k">The rule that outlives every engine</span>
+    <p>The renderer reads sim state and never writes back. Every mutation goes through the same command
+      surface the browser drives today (<code>rust/web</code> is the de facto spec). The fun is entirely
+      in the numbers and the routing, and none of it is in the rendering — which is why the design gets
+      judged in a browser tab before a single engine scene exists.</p>
   </div>
 </section>
 
@@ -462,6 +461,20 @@
 <!-- ══════════════════════════ 7 PHASES ══════════════════════════ -->
 <section id="phases">
   <h2>7 · The six phases of a round</h2>
+
+  <div class="callout teal">
+    <span class="k">Design delta — 2026-08-10: the shop became a deck</span>
+    <p>The acquisition layer described below and in the §8 walkthrough — a credit shop that rolls
+      machines each round — has been superseded by <strong>blueprint cards</strong>: a run deck, a hand
+      dealt each round (you can only place what you were dealt), placing consumes the card, selling
+      refunds it, and each cleared shift adds one offered card to the deck. Belts stay 1-credit
+      infrastructure. This is what the playable build runs (<code>rust/core/src/deck.rs</code>).
+      The shop prose below stands as the pre-card record until the walkthrough is re-authored against
+      measured card-mode runs; the boards, quotas and payouts it quotes are unaffected — they depend on
+      the sim, not on how machines are acquired. Open questions on the card design live in
+      <code>NOTES.md</code>.</p>
+  </div>
+
   <p>Every round is the same six beats. Phases 1–3 are untimed and deliberate; phase 4 is the payoff you
     watch; 5–6 are the dopamine. Total round length: 2–5 minutes, growing across the run.</p>
 
@@ -483,11 +496,12 @@
   <div class="callout teal">
     <span class="k">Which of these numbers are real</span>
     <p>The <strong>round 1 and round 4 boards are executable</strong> — they exist as data in
-      <code>sim/src/boards.ts</code> and the reference simulation reproduces every figure quoted below
+      <code>rust/core/src/boards.rs</code> and the simulation reproduces every figure quoted below
       (52 credits from 13 ingots with the first landing on tick 12; 240 credits from 10 quality-2 gears).
-      Run <code>bun test</code> in <code>sim/</code> to check. Rounds 7 and 11 are <em>hand-estimated</em>:
-      they use mechanics the reference sim doesn't implement yet (Filter gates, Splitters, Duplicator
-      economics), so treat their payouts as design targets rather than measurements.</p>
+      Run <code>cargo test</code> in <code>rust/</code> to check. Rounds 7 and 11 are <em>hand-estimated</em>:
+      Filter gates and Splitters are implemented and tested now, but those boards haven't been built and
+      measured yet, and Duplicator economics remain approximate — so treat their payouts as design targets
+      rather than measurements.</p>
   </div>
 
   <!-- ROUND 1 -->
@@ -759,56 +773,59 @@
   <table>
     <thead><tr><th>Layer</th><th>Contents</th><th>Rule</th></tr></thead>
     <tbody>
-      <tr><td>Sim</td><td><code>Board</code> (2D array of <code>Machine</code>), <code>Item</code> structs,
-        <code>tick()</code>, seeded <code>RandomNumberGenerator</code></td>
-        <td>Pure data. No <code>Node</code>, no <code>get_node</code>, no delta time. Runs headless in a test.</td></tr>
-      <tr><td>Data</td><td><code>MachineDef</code>, <code>RelicDef</code>, <code>AuditDef</code> as
-        <code>Resource</code> (.tres) or JSON</td>
-        <td>Every number lives here. Zero balance constants in code. Hot-reloadable.</td></tr>
-      <tr><td>View</td><td>TileMapLayer floor · one Node2D per machine · one
-        <code>MultiMeshInstance2D</code> for <em>all</em> items · Control-based UI</td>
+      <tr><td>Sim</td><td><code>Sim</code> (2D array of tiles), <code>Item</code> structs,
+        <code>step()</code>, seeded RNG — <code>rust/core/src/sim.rs</code></td>
+        <td>Pure data. No engine types, no I/O, no delta time. Runs headless in a test. <em>Built.</em></td></tr>
+      <tr><td>Data</td><td><code>MachineDef</code>, recipes, auras, card pool —
+        <code>rust/core/src/defs.rs</code>; relics/audits to follow</td>
+        <td>Every number lives here. Zero balance constants in the sim. <em>Built.</em></td></tr>
+      <tr><td>View</td><td>Today: canvas shell over the wasm bridge. Later: Bevy — tile floor, one
+        instanced draw for <em>all</em> items, UI nodes</td>
         <td>Reads sim state, interpolates between ticks, writes nothing back.</td></tr>
     </tbody>
   </table>
   <p><strong>Tick rate:</strong> sim at 20 Hz, decoupled from frames. Items lerp between their previous and
     current tile for smooth motion. Speed control (1× / 2× / 4× / instant) is just how many sim ticks you
     run per frame — free, because the sim doesn't know about time.</p>
-  <p><strong>Item rendering:</strong> a late-game board has 300–2,000 items in flight. One
-    <code>MultiMeshInstance2D</code> with per-instance colour draws all of them in a single call. Never
-    a scene node per item — that's the one decision that will bite you at round 11 if you get it wrong.</p>
+  <p><strong>Item rendering:</strong> a late-game board has 300–2,000 items in flight. One instanced
+    draw with per-instance colour renders all of them in a single call. Never a scene object per item —
+    that's the one decision that will bite you at round 11 if you get it wrong.</p>
 
   <h3>Milestones</h3>
   <table>
     <thead><tr><th>#</th><th>Milestone</th><th>Done when</th></tr></thead>
     <tbody>
-      <tr><td>1</td><td>Tick sim, no rendering</td><td>A unit test builds drill→belt→furnace→vault and asserts 13 ingots at tick 60.</td></tr>
-      <tr><td>2</td><td>Board renders + items move</td><td>You can watch the round-1 board run and it looks right.</td></tr>
-      <tr><td>3</td><td>Placement UI</td><td>Buy, place, rotate, sell. Ghost preview, invalid tiles flagged.</td></tr>
-      <tr><td>4</td><td>Full round loop</td><td>All six phases, quota, payout, one shop, game over. <em>This is your first playtest.</em></td></tr>
-      <tr><td>5</td><td>Loops &amp; quality</td><td>Filter, Polisher, Duplicator. Closed belt circuits resolve without infinite loops in one tick.</td></tr>
+      <tr><td>1</td><td>Tick sim, no rendering</td><td>✅ A unit test builds drill→belt→furnace→vault and asserts 13 ingots at tick 60.</td></tr>
+      <tr><td>2</td><td>Board renders + items move</td><td>✅ You can watch the round-1 board run and it looks right.</td></tr>
+      <tr><td>3</td><td>Placement UI</td><td>✅ Play cards, lay belts, rotate, sell. Ghost preview; illegal placements refused by the core.</td></tr>
+      <tr><td>4</td><td>Full round loop</td><td>✅ Build, shift, quota, reward, game over — the card/deck run structure, in the browser. <em>Playtesting is unblocked.</em></td></tr>
+      <tr><td>5</td><td>Loops &amp; quality</td><td>◐ Filter, Polisher and closed-circuit rotation are in and tested; Duplicator economics still approximate.</td></tr>
       <tr><td>6</td><td>Content pass</td><td>30 machines, 20 relics, 10 audits, all as data files.</td></tr>
-      <tr><td>7</td><td>Feel</td><td>Jam pulses, delivery pops, payout counter, audio. The difference between a prototype and a game.</td></tr>
+      <tr><td>7</td><td>Feel</td><td>Jam pulses, delivery pops, payout counter, audio. The difference between a prototype and a game. (Likely where Bevy enters.)</td></tr>
       <tr><td>8</td><td>Meta</td><td>Corporations, debt levels, unlocks, save/load, run history.</td></tr>
     </tbody>
   </table>
 
   <h3>The one hard technical problem</h3>
-  <p>Resolving a tick when items move into tiles other items are simultaneously leaving. Solve it by
-    <strong>iterating the board in reverse flow order</strong> — compute a topological order of machines
-    by output direction once at build time, then move downstream tiles first so each vacates before its
-    upstream neighbour fills it. Closed loops have no topological order, so detect cycles at build time and
-    resolve each cycle with a two-pass "claim then commit": every item claims its target, conflicts resolve
-    by a stable tile index, then all uncontested moves commit at once. Deterministic, order-independent, and
-    it makes belt loops behave exactly like straight belts — which is what lets the polish loop exist at all.</p>
+  <p>Resolving a tick when items move into tiles other items are simultaneously leaving. Naive per-tile
+    movement fails two ways: a full belt line only advances at its head (items should move as a train),
+    and a full closed loop deadlocks (it should rotate). The implemented solution — see
+    <code>transfer()</code> in <code>rust/core/src/sim.rs</code> — moves <strong>downstream tiles
+    first</strong>: that order is a reverse topological sort of the flow graph, which only exists if the
+    graph is acyclic, and belt loops are deliberately cyclic. So: Tarjan strongly-connected components,
+    process the condensed DAG sinks-first, and resolve each multi-tile component (a loop) as a
+    simultaneous rotation. Deterministic, order-independent, and it makes belt loops behave exactly like
+    straight belts — which is what lets the polish loop exist at all.</p>
 </section>
 
 <footer>
   <p style="margin:0 0 10px">OVERFLOW · design document v0.1 · all numbers are first-pass targets and
     expect to move ±40% on contact with playtesting.</p>
-  <p style="margin:0">Source, reference simulation and open questions:
+  <p style="margin:0">Source, simulation and open questions:
     <a href="https://github.com/brensch/factorygame">github.com/brensch/factorygame</a> ·
-    the round&nbsp;1 and round&nbsp;4 boards in §8 are executable — <code>bun test</code> in
-    <code>sim/</code> asserts every figure they quote.</p>
+    the round&nbsp;1 and round&nbsp;4 boards in §8 are executable — <code>cargo test</code> in
+    <code>rust/</code> asserts every figure they quote · playable at
+    <a href="https://brensch.github.io/factorygame/play/">/play/</a>.</p>
 </footer>
 
 </div>

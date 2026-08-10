@@ -1,6 +1,6 @@
-//! Deterministic PRNG — a faithful port of the mulberry32 used by the TS
-//! reference sim, including JS's ToInt32 coercion semantics, so the two
-//! implementations can be diffed run-for-run while both exist.
+//! Deterministic PRNG — mulberry32, kept bit-identical to the retired TS
+//! reference sim (including JS's coercion semantics) so historical runs and
+//! the pinned test numbers stay reproducible.
 
 #[derive(Clone, Debug)]
 pub struct Rng {

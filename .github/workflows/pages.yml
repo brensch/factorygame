@@ -23,11 +23,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # NOTE: this step fails until Pages is enabled ONCE for the repo, at
+      # Settings -> Pages -> Source: "GitHub Actions". It cannot self-enable:
+      # creating a Pages site needs `administration: write`, and GITHUB_TOKEN
+      # can never hold that scope. `enablement: true` was tried and fails for
+      # exactly this reason — don't retry it.
       - uses: actions/configure-pages@v5
-        with:
-          # turn Pages on via the API using this workflow's pages:write token,
-          # so nobody has to click through repo Settings
-          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs

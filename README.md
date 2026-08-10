@@ -13,9 +13,17 @@ and closed belt loops that circulate items through Polishers until they qualify 
 **[`docs/index.html`](docs/index.html)** — the whole design, with SVG board diagrams, the machine
 catalogue, the six-phase round loop, and a complete 12-round walkthrough.
 
-It's a single self-contained HTML file: no build step, no CDN. Open it directly, or read it at
-the GitHub Pages URL once Pages is enabled (Settings → Pages → Source: GitHub Actions; the
-workflow in `.github/workflows/pages.yml` handles the rest).
+It's a single self-contained HTML file: no build step, no CDN.
+
+**Read it in a browser right now:**
+[htmlpreview.github.io/?…/docs/index.html](https://htmlpreview.github.io/?https://raw.githubusercontent.com/brensch/factorygame/main/docs/index.html)
+
+That works with zero setup because the repo is public. For a proper URL —
+`https://brensch.github.io/factorygame/` — Pages needs enabling **once**, at
+Settings → Pages → Source: *GitHub Actions*. After that the workflow in
+`.github/workflows/pages.yml` deploys on every change to `docs/`, and the same
+mechanism will serve playable web builds later. A workflow cannot enable Pages for
+itself; it needs an admin-scoped token, which `GITHUB_TOKEN` never has.
 
 ## 🧪 The reference simulation
 

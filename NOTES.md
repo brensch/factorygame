@@ -36,31 +36,45 @@ so both the board and the prose were corrected. That is the sim earning its keep
 - Relics and audit modifiers. Audits are flagged in the UI (`AUDIT_ROUNDS` in `run.rs`) and the
   final one halves the shift; the rest do not yet change any rule.
 
-## The card/deck design (2026-08-10) — open questions
+## The blueprint-shop design (2026-08-10, v2) — replacing the deal-a-hand deck
 
-Machines are **blueprint cards**: a run deck, a hand dealt each round, rewards add cards to the
-deck, placing a machine consumes its card, selling returns it. Belts stay as 1-credit
-infrastructure — a deck of belt cards is a deck of dead draws. Implemented in
-`rust/core/src/deck.rs` + `run.rs`, and **now the design the browser build plays**, so these
-stop being armchair questions:
+The first card design (deck, dealt hands, one reward pick per round) played one day and
+failed measurably: acquisition was capped at 1 card/round while quotas compound ~1.9×, so
+payout capacity (≈27c per card, measured) hit the quota wall at round 4 for every player and
+every bot — and credits piled up with nothing to buy. **The faucet was the wall.**
 
-1. **Hand size and dead hands.** A mid-run deck of 15 with hand size 4 can deal zero playable
-   cards. Mulligan? Scry? Credits-to-redraw?
-2. **Are consumed cards the right scarcity?** Placing removes the card permanently (selling
-   recovers it). Alternative: cards as reusable blueprints, credits as the only limit — less
-   scarcity, more combo. The lab can answer this empirically: implement both, compare
-   run-length distributions.
-3. **Rarity/weighting.** Offers are currently uniform over the unlocked pool. Rarity tiers
-   change both balance and the dopamine curve.
-4. **Should configuration live on the card?** A "Filter ≥7" card vs a "Filter ≥3" card, rather
-   than a threshold set at placement — more draft texture, less fiddling.
+Current design (`rust/core/src/cards.rs` + `run.rs`):
+
+- The hand is a **persistent inventory** of owned blueprints, capped at 10.
+- Clearing a shift opens the **shop**: 5 offers, buy any you can afford (into the hand),
+  reroll the rack for 5c. This is the credit sink that lets growth compound with the curve.
+- Placing is free (paid at purchase); pulling a machine off the board returns its blueprint
+  to the hand; selling a blueprint from the hand refunds half.
+- Belts (1c) and **Junctions** (2c, Mindustry-style crossing) are infrastructure, not cards.
+
+Measured immediately: LaneBot went from 0/2000 clearing round 4 to 719/2000, with deaths now
+at round 5 — and round 5 is a *board geometry* ceiling (7 rows = 7 lanes ≈ 400c), which is
+exactly the "widening must die here" wall the design wants. The next instrument is a TierBot
+that knows the Fabricator, to measure where tier-2 play dies.
+
+Still open:
+
+1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change
+   both balance and the dopamine curve.
+2. **Should configuration live on the card?** A "Filter ≥7" card vs a "Filter ≥3" card,
+   rather than a threshold set at placement — more draft texture, less fiddling.
+3. **Reroll pricing.** Flat 5c makes late-game fishing free in practice; escalating per-shop
+   rerolls (5, 10, 15…) may be needed once credits are large.
+4. **Hand cap 10.** Arbitrary; revisit once real runs show hoarding patterns.
 
 ## What the lab has measured so far
 
-- **LaneBot (widen-only) dies at round 4 in 2,000/2,000 runs.** Quota 200 is exactly the wall
-  the design doc says forces a tier jump. The zero variance also says rounds 1–3 are pure
-  formality even for a trivial player — consider tightening.
-- Full runs simulate at ~6,200/sec single-threaded, so parameter sweeps over `defs.rs` are cheap.
+- **Under the deck design: LaneBot died at round 4 in 2,000/2,000 runs** — which turned out
+  to be the acquisition faucet, not the intended skill wall (see the v2 design note above).
+- **Under the shop design: LaneBot clears round 4 in 719/2,000 runs and dies at round 5**,
+  where the board's 7 rows cap pure widening at ~400c. The wall is now geometric, which is
+  the wall the design doc actually claims.
+- Full runs simulate at ~5,000/sec single-threaded, so parameter sweeps over `defs.rs` are cheap.
 - Next bots, in order: TierBot (knows the Fabricator), LoopBot (knows the gated polish ring),
   then a search-based baseline. The spread between their death rounds is a direct measurement
   of how much depth each mechanic actually buys.
@@ -71,8 +85,10 @@ stop being armchair questions:
    It may just be a build that either wins outright or bricks your factory with no middle ground.
    Filter exists now; needs a parameter sweep.
 2. **Is 60 ticks the right shift length?** Transit is ~20% of the shift on the round-1 board and
-   more later. If travel time dominates, players will optimise layout compactness over everything
-   else and the board stops feeling like a factory.
+   more later. Worse for loops: rings start empty every shift and a gate-10 ring needs ~40 ticks
+   before its first ejection, so loop latency eats most of the shift. Candidate fix worth
+   testing: circulating items persist on the board between rounds (the factory stays warm),
+   which also removes the stranded-items feel-bad.
 3. **Does the quality cap of 10 arrive too early?** In the loop test the ring hits the cap in
    about 40 ticks, at which point extra Polishers are dead weight. Either the cap wants to be
    higher by default, or `Overengineered` is a mandatory relic rather than an interesting one —

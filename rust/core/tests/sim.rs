@@ -3,10 +3,8 @@
 //! the 19 pinned numbers survived the crossing and now live only here.
 
 use overflow_core::boards::*;
-use overflow_core::deck::Deck;
 use overflow_core::defs::{item_value, Dir, ItemType, MachineId, QUALITY_CAP};
-use overflow_core::rng::Rng;
-use overflow_core::run::{Game, GamePhase, QUOTAS};
+use overflow_core::run::{Game, GamePhase, HAND_MAX, QUOTAS, REROLL_COST, SHOP_SIZE};
 use overflow_core::sim::{run_board, Placement, Sim};
 
 const SEED: u32 = 0xc0ffee;
@@ -169,65 +167,63 @@ fn rejects_out_of_bounds_placement() {
     assert!(Sim::new(3, 3, &cells, SEED).err().unwrap().contains("out of bounds"));
 }
 
-// ── deck ────────────────────────────────────────────────────────────────────
-
 #[test]
-fn deck_draws_are_deterministic_per_seed() {
-    let mut r1 = Rng::new(7);
-    let mut r2 = Rng::new(7);
-    let mut d1 = Deck::starting(&mut r1);
-    let mut d2 = Deck::starting(&mut r2);
-    assert_eq!(d1.draw(4, &mut r1), d2.draw(4, &mut r2));
+fn junction_crosses_two_lanes_without_mixing() {
+    // Ore runs west→east, sap runs north→south, sharing one junction tile.
+    let cells = vec![
+        Placement::new(0, 2, MachineId::Drill, Some(Dir::E)),
+        Placement::new(1, 2, MachineId::Belt, Some(Dir::E)),
+        Placement::new(2, 2, MachineId::Junction, None),
+        Placement::new(3, 2, MachineId::Belt, Some(Dir::E)),
+        Placement::new(4, 2, MachineId::Vault, None),
+        Placement::new(2, 0, MachineId::Tap, Some(Dir::S)),
+        Placement::new(2, 1, MachineId::Belt, Some(Dir::S)),
+        Placement::new(2, 3, MachineId::Belt, Some(Dir::S)),
+        Placement::new(2, 4, MachineId::Vault, None),
+    ];
+    let r = run_board(5, 5, &cells, 60, 1).unwrap();
+    assert!(r.count(ItemType::Ore) >= 12, "ore crossed: {}", r.count(ItemType::Ore));
+    assert!(r.count(ItemType::Sap) >= 7, "sap crossed: {}", r.count(ItemType::Sap));
 }
 
-#[test]
-fn deck_recycles_discard_but_not_consumed_cards() {
-    let mut rng = Rng::new(1);
-    let mut d = Deck::starting(&mut rng); // 4 cards
-    let hand = d.draw(4, &mut rng);
-    assert_eq!(hand.len(), 4);
-    assert_eq!(d.size(), 0);
-    // play two (consumed — never returned), discard two
-    d.to_discard(hand[2]);
-    d.to_discard(hand[3]);
-    let next = d.draw(4, &mut rng);
-    assert_eq!(next.len(), 2); // only the discarded pair cycles back
-}
-
-// ── run structure ───────────────────────────────────────────────────────────
+// ── run structure: the hand and the shop ─────────────────────────────────────
 
 #[test]
-fn a_full_scripted_round_1_clears_quota() {
+fn a_full_scripted_round_1_clears_quota_and_opens_the_shop() {
     let mut g = Game::new(42);
     assert_eq!(g.credits, 15);
-    assert_eq!(g.hand.len(), 4);
+    assert_eq!(g.hand.len(), 4); // 2 Drills + 2 Furnaces, the starting kit
 
-    // hand is 2 Drills + 2 Furnaces in some order; find one of each
     let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
     g.play_card(drill, 0, 3, Some(Dir::E), None, None).unwrap();
     let furnace = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
     g.play_card(furnace, 4, 3, Some(Dir::E), None, None).unwrap();
-    for x in [1, 2, 3] {
+    for x in [1, 2, 3, 5, 6, 7, 8] {
         g.buy_belt(x, 3, Dir::E).unwrap();
     }
-    for x in [5, 6, 7, 8] {
-        g.buy_belt(x, 3, Dir::E).unwrap();
-    }
+    // placement is free (paid at the shop); only the 7 belts cost credits
+    assert_eq!(g.credits, 15 - 7);
 
     let projected = g.project().unwrap().payout;
     assert!(projected >= QUOTAS[0], "projection {projected} should clear 20");
 
     let outcome = g.run_shift().unwrap();
     assert!(outcome.cleared);
-    assert_eq!(g.phase, GamePhase::Reward);
-    assert_eq!(g.offers.len(), 3);
+    assert_eq!(g.phase, GamePhase::Shop);
+    assert_eq!(g.offers.len(), SHOP_SIZE);
 
-    g.pick_reward(Some(0)).unwrap();
+    // buy something affordable, then leave
+    let credits_before = g.credits;
+    let cheap = (0..g.offers.len()).min_by_key(|&i| g.offers[i].cost()).unwrap();
+    let cost = g.offers[cheap].cost();
+    g.shop_buy(cheap).unwrap();
+    assert_eq!(g.credits, credits_before - cost);
+    assert_eq!(g.hand.len(), 3); // 2 unplayed + the purchase
+
+    g.shop_done().unwrap();
     assert_eq!(g.round, 1);
     assert_eq!(g.phase, GamePhase::Build);
-    // 2 unplayed + 1 reward recycle back; the 2 placed machines are consumed,
-    // so the deck genuinely shrank — that scarcity is the design.
-    assert_eq!(g.hand.len(), 3);
+    assert_eq!(g.hand.len(), 3); // the hand persists between rounds
 }
 
 #[test]
@@ -239,12 +235,80 @@ fn an_empty_board_ends_the_run() {
 }
 
 #[test]
-fn selling_returns_the_card_to_the_deck() {
+fn removing_a_machine_returns_its_blueprint_to_the_hand() {
     let mut g = Game::new(5);
-    let n_before = g.deck.size() + g.hand.len();
+    let n_before = g.hand.len();
     let i = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
     g.play_card(i, 0, 0, Some(Dir::E), None, None).unwrap();
-    assert_eq!(g.deck.size() + g.hand.len(), n_before - 1); // consumed
+    assert_eq!(g.hand.len(), n_before - 1);
     g.sell(0, 0).unwrap();
-    assert_eq!(g.deck.size() + g.hand.len(), n_before); // back in circulation
+    assert_eq!(g.hand.len(), n_before); // back in the hand, not a discard pile
+    assert!(g.hand.iter().filter(|c| c.machine == MachineId::Drill).count() == 2);
+}
+
+#[test]
+fn belts_refund_credits_but_machines_do_not() {
+    let mut g = Game::new(5);
+    g.buy_belt(0, 0, Dir::E).unwrap();
+    let before = g.credits;
+    g.sell(0, 0).unwrap();
+    assert_eq!(g.credits, before + 1); // infrastructure refunds in credits
+    let i = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
+    g.play_card(i, 0, 0, Some(Dir::E), None, None).unwrap();
+    let before = g.credits;
+    g.sell(0, 0).unwrap();
+    assert_eq!(g.credits, before); // machines come back as blueprints instead
+}
+
+#[test]
+fn selling_a_blueprint_recovers_half_its_price() {
+    let mut g = Game::new(5);
+    let i = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
+    let before = g.credits;
+    g.sell_blueprint(i).unwrap();
+    assert_eq!(g.credits, before + 5 / 2); // furnace costs 5, sells for 2
+    assert_eq!(g.hand.len(), 3);
+}
+
+#[test]
+fn the_hand_caps_at_ten_blueprints() {
+    let mut g = Game::new(42);
+    let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
+    g.play_card(drill, 0, 3, Some(Dir::E), None, None).unwrap();
+    let furnace = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
+    g.play_card(furnace, 4, 3, Some(Dir::E), None, None).unwrap();
+    for x in [1, 2, 3, 5, 6, 7, 8] {
+        g.buy_belt(x, 3, Dir::E).unwrap();
+    }
+    g.run_shift().unwrap();
+    g.credits = 10_000; // not testing affordability here
+    while g.hand.len() < HAND_MAX {
+        if g.offers.is_empty() {
+            g.shop_reroll().unwrap();
+        }
+        g.shop_buy(0).unwrap();
+    }
+    assert!(g.shop_buy(0).is_err(), "buying past the cap must be refused");
+    g.shop_done().unwrap();
+    // ...and pulling a machine off the board is refused too while full
+    assert!(g.sell(0, 3).is_err());
+    g.sell_blueprint(0).unwrap();
+    g.sell(0, 3).unwrap(); // room again
+}
+
+#[test]
+fn reroll_swaps_the_rack_and_charges_five() {
+    let mut g = Game::new(42);
+    let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
+    g.play_card(drill, 0, 3, Some(Dir::E), None, None).unwrap();
+    let furnace = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
+    g.play_card(furnace, 4, 3, Some(Dir::E), None, None).unwrap();
+    for x in [1, 2, 3, 5, 6, 7, 8] {
+        g.buy_belt(x, 3, Dir::E).unwrap();
+    }
+    g.run_shift().unwrap();
+    let before = g.credits;
+    g.shop_reroll().unwrap();
+    assert_eq!(g.credits, before - REROLL_COST);
+    assert_eq!(g.offers.len(), SHOP_SIZE);
 }

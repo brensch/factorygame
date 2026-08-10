@@ -12,12 +12,12 @@ and closed belt loops that circulate items through Polishers until they qualify 
 
 **→ [brensch.github.io/factorygame/play/](https://brensch.github.io/factorygame/play/)**
 
-Twelve rounds, quota nearly doubling each time — and your run is a **deck of blueprint
-cards**. Each round deals a hand; you can only place what you were dealt. Placing consumes
-the card, selling refunds it to the discard, and every cleared shift adds one card of your
-choice to the deck. Belts stay 1-credit infrastructure, always available. Drag to lay belt
-runs, click machines to rotate, right-click to sell. The projection panel runs the whole
-shift before you commit.
+Twelve rounds, quota nearly doubling each time. Machines are **blueprints you own**: a
+persistent hand (max 10), placed and re-placed freely, and between rounds the **shop** turns
+your surplus into new blueprints — buy, reroll, or bank. Belts and junctions are cheap
+infrastructure. Drag to lay belt runs, drag machines (or shift-drag groups) to rearrange,
+right-click to pull a machine back to hand. The projection panel runs the whole shift before
+you commit.
 
 The page is a thin canvas shell over the **Rust core compiled to wasm** (~85 KB). The
 JavaScript owns rendering and input and nothing else: every rule — the tick sim, the deck,

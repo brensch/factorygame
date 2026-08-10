@@ -80,7 +80,7 @@ pub enum MachineId {
     Drill, Tap, Geode,
     Furnace, Retort, Lapidary, Compress,
     Fab, CircuitBench, LensGrinder, EngineWorks,
-    Belt, Merger, Splitter, Buffer, Filter,
+    Belt, Junction, Merger, Splitter, Buffer, Filter,
     Overclock, Polisher, Heatsink, Dup,
     Vault,
 }
@@ -182,6 +182,10 @@ pub fn def(id: MachineId) -> &'static MachineDef {
 
         // ── logistics ───────────────────────────────────────────────────────
         M::Belt => &MachineDef { id: M::Belt, name: "Belt", kind: Kind::Logistics, cost: 1,
+            transport: true, ..BASE },
+        // Mindustry-style crossing: items exit the way they entered, so two
+        // lanes share the tile without mixing. Infrastructure, like belts.
+        M::Junction => &MachineDef { id: M::Junction, name: "Junction", kind: Kind::Logistics, cost: 2,
             transport: true, ..BASE },
         M::Merger => &MachineDef { id: M::Merger, name: "Merger", kind: Kind::Logistics, cost: 4,
             transport: true, ..BASE },

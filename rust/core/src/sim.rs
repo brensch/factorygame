@@ -62,6 +62,9 @@ struct Tile {
     jam_immune: bool,
     /// Splitter round-robin cursor.
     rr: u32,
+    /// Junction: the travel direction of the item currently on the tile —
+    /// it exits the way it entered.
+    jdir: Option<Dir>,
 }
 
 /// One item hop, emitted per tick so a renderer can interpolate motion.
@@ -119,7 +122,7 @@ impl Sim {
             .map(|_| Tile {
                 def: None, d: None, d2: None, cfg: FilterCfg::default(),
                 out: None, inputs: Vec::new(), progress: 0.0,
-                speed: 1.0, quality_out: 0, jam_immune: false, rr: 0,
+                speed: 1.0, quality_out: 0, jam_immune: false, rr: 0, jdir: None,
             })
             .collect();
 
@@ -197,6 +200,9 @@ impl Sim {
     fn out_dir(&self, i: usize, item: Item) -> Option<Dir> {
         let t = &self.tiles[i];
         let d = t.def?;
+        if d.id == MachineId::Junction {
+            return t.jdir; // straight through: exit the way it came in
+        }
         if d.id == MachineId::Filter {
             if let Some(d2) = t.d2 {
                 let c = t.cfg;
@@ -258,7 +264,13 @@ impl Sim {
         }
     }
 
-    fn put(&mut self, i: usize, item: Item) {
+    /// Travel direction of a hop from tile `i` to adjacent tile `j`.
+    fn dir_between(&self, i: usize, j: usize) -> Option<Dir> {
+        let (dx, dy) = (j as i32 % self.w - i as i32 % self.w, j as i32 / self.w - i as i32 / self.w);
+        Dir::ALL.into_iter().find(|d| d.delta() == (dx, dy))
+    }
+
+    fn put(&mut self, i: usize, item: Item, travel: Option<Dir>) {
         let d = self.tiles[i].def.unwrap();
         match d.kind {
             Kind::Vault => {
@@ -271,6 +283,7 @@ impl Sim {
                 let q = (item.quality + d.quality_bonus).min(QUALITY_CAP);
                 let placed = Item { id: item.id, ty: item.ty, quality: q };
                 self.tiles[i].out = Some(placed);
+                self.tiles[i].jdir = travel;
                 // Duplicator: a clone queues behind the original, released as
                 // soon as the output slot frees. Inside a loop, this is the
                 // exponential.
@@ -353,7 +366,8 @@ impl Sim {
         if self.tiles[i].def.unwrap().id == MachineId::Splitter {
             self.tiles[i].rr += 1;
         }
-        self.put(j, item);
+        let travel = self.dir_between(i, j);
+        self.put(j, item, travel);
     }
 
     /// Transfer pass — the one genuinely hard problem in the whole design.
@@ -496,7 +510,8 @@ impl Sim {
                 if self.tiles[i].def.unwrap().id == MachineId::Splitter {
                     self.tiles[i].rr += 1;
                 }
-                self.put(j, item);
+                let travel = self.dir_between(i, j);
+                self.put(j, item, travel);
             }
         }
     }

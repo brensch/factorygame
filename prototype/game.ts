@@ -22,10 +22,10 @@ interface Outcome {
 }
 interface State {
   round: number; credits: number; quota: number; shiftLen: number;
-  audit: boolean; phase: "build" | "reward" | "over"; won: boolean;
+  audit: boolean; phase: "build" | "shop" | "over"; won: boolean;
   qualityCap: number; boardW: number; boardH: number;
   board: Pl[]; hand: Card[]; offers: Card[];
-  deckDraw: number; deckDiscard: number;
+  handMax: number; rerollCost: number;
   nextQuota: number | null; nextAudit: boolean;
   auras: { x: number; y: number }[];
   flows: Flow[];
@@ -70,12 +70,16 @@ const core = wasm.instance.exports as {
   boot(seed: number): number;
   state(): number;
   belt(x: number, y: number, d: number): number;
+  junction(x: number, y: number): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
   sell(x: number, y: number): number;
+  sell_hand(i: number): number;
   rotate(x: number, y: number): number;
   rotate2(x: number, y: number): number;
   set_gate(x: number, y: number, q: number): number;
-  pick_reward(i: number): number;
+  shop_buy(i: number): number;
+  shop_reroll(): number;
+  shop_done(): number;
   project(): number;
   shift_start(): number;
   shift_step(): number;
@@ -127,7 +131,7 @@ const ITEM_COLOR: Record<string, string> = {
 };
 
 // ── client state: what the player is doing, never what the game is ───────────
-type Tool = { kind: "belt" } | { kind: "card"; idx: number };
+type Tool = { kind: "belt" } | { kind: "junction" } | { kind: "card"; idx: number };
 
 let G: State;
 const ui = {
@@ -285,7 +289,23 @@ function draw() {
     const outs = outFlows.get(k) ?? [];
     const ins = inFlows.get(k) ?? [];
 
-    if (c.m === "belt" || c.m === "merger") {
+    if (c.m === "junction") {
+      // the crossing: both axes drawn edge to edge, with a hub so it reads
+      // as over/under rather than a merge
+      ctx.strokeStyle = "#3a4655";
+      ctx.lineWidth = Math.max(6, TILE * 0.17);
+      ctx.lineCap = "round";
+      const [wx, wy] = edgeMid(c.x, c.y, "W"), [ex, ey] = edgeMid(c.x, c.y, "E");
+      const [nx, ny] = edgeMid(c.x, c.y, "N"), [sx, sy] = edgeMid(c.x, c.y, "S");
+      ctx.beginPath(); ctx.moveTo(wx, wy); ctx.lineTo(ex, ey); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(nx, ny); ctx.lineTo(sx, sy); ctx.stroke();
+      ctx.fillStyle = "#232c38";
+      ctx.strokeStyle = "#8ea1b8";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(cx, cy, Math.max(4, TILE * 0.12), 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      for (const f of ins) portIn(c.x, c.y, f.d);
+    } else if (c.m === "belt" || c.m === "merger") {
       // A belt is a path: from every edge that feeds it, through the centre,
       // out the arrow edge. Corners curve, merges fork — the routing is the
       // drawing.
@@ -378,7 +398,9 @@ function draw() {
   // ghost of the pending placement under the cursor, arrow showing where
   // its output will point (R rotates before placing)
   if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y) && !drag) {
-    const mKey = ui.tool.kind === "belt" ? "belt" : G.hand[ui.tool.idx]?.m;
+    const mKey = ui.tool.kind === "belt" ? "belt"
+      : ui.tool.kind === "junction" ? "junction"
+      : G.hand[ui.tool.idx]?.m;
     const m = mKey ? MDEF.get(mKey) : undefined;
     if (m) {
       ctx.globalAlpha = 0.32;
@@ -389,7 +411,7 @@ function draw() {
       ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 1.5;
       rr(hover.x * TILE + 2, hover.y * TILE + 2, TILE - 4, TILE - 4, 7);
       ctx.stroke();
-      if (m.transport || m.produces || m.recipe) {
+      if ((m.transport || m.produces || m.recipe) && m.m !== "junction") {
         const hcx = hover.x * TILE + TILE / 2, hcy = hover.y * TILE + TILE / 2;
         arrow(hcx, hcy, ui.dir, TILE / 2 - 6, "#ffffffaa");
       }
@@ -473,6 +495,10 @@ function placeAt(x: number, y: number, d: Dir) {
     cmd(core.belt(x, y, DCODE[d]));
     return;
   }
+  if (ui.tool.kind === "junction") {
+    cmd(core.junction(x, y));
+    return;
+  }
   const card = G.hand[ui.tool.idx];
   if (!card) return;
   // Filters eject sideways by default; splitters split sideways. The core
@@ -480,7 +506,7 @@ function placeAt(x: number, y: number, d: Dir) {
   const d2 = card.m === "filter" || card.m === "splitter" ? turn(d) : null;
   const minQ = card.m === "filter" ? 5 : -1;
   if (cmd(core.play(ui.tool.idx, x, y, DCODE[d], dc(d2), minQ))) {
-    ui.tool = { kind: "belt" }; // the card is consumed; drop back to belts
+    ui.tool = { kind: "belt" }; // the blueprint is placed; drop back to belts
   }
 }
 
@@ -489,28 +515,40 @@ function paintHand() {
   const pal = document.getElementById("pal")!;
   pal.innerHTML = "";
 
-  const beltEl = document.createElement("div");
-  beltEl.className = "pi" + (ui.tool.kind === "belt" ? " on" : "") + (G.credits >= 1 ? "" : " no");
-  beltEl.innerHTML =
-    `<div class="sw" style="background:${CAT.logistics}">▸</div>` +
-    `<div class="nm">Belt</div><div class="cs">1c</div>`;
-  beltEl.onclick = () => { ui.tool = { kind: "belt" }; ui.selected = null; paintAll(); };
-  pal.appendChild(beltEl);
+  const infra = (kind: Tool["kind"], label: string, glyph: string, cost: number) => {
+    const el = document.createElement("div");
+    el.className = "pi" + (ui.tool.kind === kind ? " on" : "") + (G.credits >= cost ? "" : " no");
+    el.innerHTML =
+      `<div class="sw" style="background:${CAT.logistics}">${glyph}</div>` +
+      `<div class="nm">${label}</div><div class="cs">${cost}c</div>`;
+    el.onclick = () => { ui.tool = { kind } as Tool; ui.selected = null; paintAll(); };
+    pal.appendChild(el);
+  };
+  infra("belt", "Belt", "▸", 1);
+  infra("junction", "Junction", "✚", 2);
 
   G.hand.forEach((card, i) => {
     const el = document.createElement("div");
-    const afford = G.credits >= card.cost;
     const on = ui.tool.kind === "card" && ui.tool.idx === i;
-    el.className = "pi" + (on ? " on" : "") + (afford ? "" : " no");
+    el.className = "pi" + (on ? " on" : "");
     el.innerHTML =
       `<div class="sw" style="background:${CAT[card.kind]}">${SHORT[card.m] || "▸"}</div>` +
-      `<div class="nm">${card.name}</div><div class="cs">${card.cost}c</div>`;
+      `<div class="nm">${card.name}</div><div class="cs">owned</div>`;
     el.onclick = () => { ui.tool = { kind: "card", idx: i }; ui.selected = null; paintAll(); };
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
+      const value = Math.floor(card.cost / 2);
+      if (cmd(core.sell_hand(i))) {
+        if (ui.tool.kind === "card") ui.tool = { kind: "belt" };
+        toast(`Sold ${card.name} blueprint for ${value}c`);
+      }
+      paintAll();
+    };
     pal.appendChild(el);
   });
 
   (document.getElementById("deckInfo") as HTMLElement).textContent =
-    `deck ${G.deckDraw} · discard ${G.deckDiscard}`;
+    `hand ${G.hand.length}/${G.handMax}`;
 }
 
 // ── the info panel: what a machine does, fed by the core's catalogue ─────────
@@ -612,10 +650,10 @@ function infoHTML(key: string): string {
 function paintInfo() {
   const title = document.getElementById("infoTitle")!;
   const body = document.getElementById("infoBody")!;
-  // Priority: a selected placed machine, else the card in hand, else the belt.
-  let key = "belt";
-  if (ui.selected) key = at(ui.selected.x, ui.selected.y)?.m ?? "belt";
-  else if (ui.tool.kind === "card") key = G.hand[ui.tool.idx]?.m ?? "belt";
+  // Priority: a selected placed machine, else the selected card or tool.
+  let key = ui.tool.kind === "junction" ? "junction" : "belt";
+  if (ui.selected) key = at(ui.selected.x, ui.selected.y)?.m ?? key;
+  else if (ui.tool.kind === "card") key = G.hand[ui.tool.idx]?.m ?? key;
   const m = MDEF.get(key);
   title.innerHTML = m ? `${m.name} <span class="deckinfo">${m.cost}c · ${m.kind}</span>` : "—";
   body.innerHTML = infoHTML(key);
@@ -879,6 +917,7 @@ window.addEventListener("keydown", (e) => {
     paintAll();
   }
   if (e.key === "b" || e.key === "B") { ui.tool = { kind: "belt" }; paintAll(); }
+  if (e.key === "j" || e.key === "J") { ui.tool = { kind: "junction" }; paintAll(); }
   if (e.key === " ") { e.preventDefault(); runShift(); }
   const n = parseInt(e.key, 10);
   if (n >= 1 && n <= 9 && G.hand[n - 1]) {
@@ -950,7 +989,7 @@ function endShift() {
   ui.positions.clear();
   (document.getElementById("bRun") as HTMLButtonElement).disabled = false;
   cmd(core.shift_finish());
-  if (G.phase === "reward") offerRewards();
+  if (G.phase === "shop") openShop();
   else if (G.phase === "over") G.won ? victory() : gameOver();
   paintAll();
 }
@@ -963,34 +1002,51 @@ function modal(html: string) {
 }
 function closeModal() { document.getElementById("modal")!.classList.remove("on"); }
 
-function offerRewards() {
+function openShop() {
   const o = G.last!;
   const surplus = o.payout - o.quota;
+  const full = G.hand.length >= G.handMax;
   modal(
-    `<h3>Shift complete</h3>
+    `<h3>The shop</h3>
      <p>Delivered <b style="color:var(--vault)">${o.payout.toLocaleString()}</b> against a quota of
-        ${o.quota.toLocaleString()}. Surplus of ${surplus.toLocaleString()} banked —
-        you now have <b>${G.credits}</b> credits.
-        ${o.inFlight} items were still on belts and were forfeit.</p>
-     <p style="margin-bottom:10px"><b>Round ${G.round + 2}</b> needs
+        ${o.quota.toLocaleString()} — surplus of ${surplus.toLocaleString()} banked.
+        ${o.inFlight ? `${o.inFlight} items stranded on belts were forfeit.` : ""}
+        <b>Round ${G.round + 2}</b> needs
         <b style="color:var(--extractor)">${(G.nextQuota ?? 0).toLocaleString()}</b>${G.nextAudit
-          ? ` — and it's an <b style="color:var(--processor)">AUDIT</b>.`
-          : "."} Add one blueprint card to your deck:</p>
-     <div class="offers">${G.offers.map((c, i) =>
-       `<div class="off" data-i="${i}">
+          ? ` — an <b style="color:var(--processor)">AUDIT</b>.`
+          : "."}</p>
+     <div class="kv" style="margin-bottom:10px;gap:7px;justify-content:flex-start"><span>Credits</span>
+        <b style="color:var(--extractor)">${G.credits}</b>
+        <span style="margin-left:auto">Hand</span><b>${G.hand.length}/${G.handMax}</b></div>
+     <div class="offers">${G.offers.map((c, i) => {
+       const afford = G.credits >= c.cost && !full;
+       return `<div class="off${afford ? "" : " no"}" data-i="${i}">
          <div class="sw" style="background:${CAT[c.kind]}">${SHORT[c.m] || "▸"}</div>
          <div class="nm">${c.name}</div>
-         <div class="ds">${c.cost}c · ${mechShort(c.m)}</div>
-         <div class="bl">${MDEF.get(c.m)?.blurb ?? ""}</div></div>`).join("")}</div>
-     <button data-i="-1" style="width:100%">Skip — keep the deck lean</button>`,
+         <div class="ds"><b>${c.cost}c</b> · ${mechShort(c.m)}</div>
+         <div class="bl">${MDEF.get(c.m)?.blurb ?? ""}</div></div>`;
+     }).join("")}</div>
+     <div class="row">
+       <button id="reroll"${G.credits >= G.rerollCost ? "" : " disabled"}>Reroll rack — ${G.rerollCost}c</button>
+       <button class="go" id="shopDone">Start round ${G.round + 2}</button>
+     </div>
+     ${full ? `<p style="margin:10px 0 0;font-size:12px">Hand full — right-click a hand card in the sidebar to sell it.</p>` : ""}`,
   );
-  document.querySelectorAll<HTMLElement>("[data-i]").forEach((el) => {
+  document.querySelectorAll<HTMLElement>(".off[data-i]").forEach((el) => {
     el.onclick = () => {
-      cmd(core.pick_reward(+el.dataset.i!));
-      closeModal();
-      paintAll();
+      if (cmd(core.shop_buy(+el.dataset.i!))) paintAll();
+      openShop(); // re-render the rack either way
     };
   });
+  (document.getElementById("reroll") as HTMLElement).onclick = () => {
+    cmd(core.shop_reroll());
+    openShop();
+  };
+  (document.getElementById("shopDone") as HTMLElement).onclick = () => {
+    cmd(core.shop_done());
+    closeModal();
+    paintAll();
+  };
 }
 
 function gameOver() {
@@ -1044,15 +1100,15 @@ paintAll();
 
 modal(
   `<h3>OVERFLOW</h3>
-   <p>Your run is a <b>deck of blueprint cards</b>. Each round deals you a hand —
-      you can only place what you were dealt. Belts are always available for 1 credit.
-      Route items into the <b style="color:var(--vault)">Vault</b> and beat the quota
-      in ${G.shiftLen} ticks; surplus becomes credits, and each cleared shift adds
-      one card of your choice to the deck.</p>
+   <p>Machines are <b>blueprints</b> you own: place them, move them, pull them back
+      to your hand — all free. Belts and junctions are cheap infrastructure. Route
+      items into the <b style="color:var(--vault)">Vault</b> and beat the quota in
+      ${G.shiftLen} ticks; the surplus is yours, and between rounds the
+      <b>shop</b> sells new blueprints. That surplus is your growth — overshoot
+      the quota as far as you can.</p>
    <p>Start simple: a <b>Drill</b>, a run of <b>Belt</b> dragged toward the Vault, and a
       <b>Furnace</b> in the middle to turn Ore into Ingots. Watch the projection panel —
-      it runs the whole shift for you before you commit. Placed machines are consumed
-      from the deck; selling one (right-click) refunds it back.</p>
+      it runs the whole shift for you before you commit.</p>
    <button class="go" id="start">Start shift 1</button>`,
 );
 (document.getElementById("start") as HTMLElement).onclick = closeModal;

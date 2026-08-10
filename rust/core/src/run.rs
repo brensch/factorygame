@@ -1,18 +1,25 @@
-//! Run structure: rounds, quotas, credits, hands, the build/shift loop.
+//! Run structure: rounds, quotas, credits, the hand, the shop, the
+//! build/shift loop.
 //!
 //! This is the layer a UI (browser/WASM now, Bevy later) and the lab bots both
 //! drive. It owns no rendering and no policy — it exposes legal actions and
 //! applies them.
 
-use crate::deck::{default_unlocked, Card, Deck};
-use crate::defs::{def, Dir, Kind, MachineId, QUALITY_CAP};
+use crate::cards::{default_unlocked, shop_offers, starting_hand, Card};
+use crate::defs::{def, Dir, MachineId, QUALITY_CAP};
 use crate::rng::Rng;
 use crate::sim::{FilterCfg, Placement, ShiftResult, Sim};
 
 pub const BOARD_W: i32 = 10;
 pub const BOARD_H: i32 = 7;
 pub const QUOTAS: [i64; 12] = [20, 45, 90, 200, 400, 700, 1200, 2400, 4500, 8000, 14000, 30000];
-pub const HAND_SIZE: usize = 4;
+/// Blueprints the hand can hold. Buying past this is refused, and so is
+/// pulling a machine off the board when there's no room for its card.
+pub const HAND_MAX: usize = 10;
+/// Offers on one shop rack.
+pub const SHOP_SIZE: usize = 5;
+/// Flat cost to reroll the rack.
+pub const REROLL_COST: u32 = 5;
 pub const STARTING_CREDITS: u32 = 15;
 
 /// Rounds flagged as audits (zero-based). Mechanically, only the final one
@@ -32,8 +39,8 @@ pub fn shift_len(round: usize) -> u32 {
 pub enum GamePhase {
     /// Placing machines and belts; hand is live.
     Build,
-    /// Awaiting a reward pick (index into `offers`).
-    Reward,
+    /// The between-rounds shop: buy blueprints, reroll, continue.
+    Shop,
     /// Run ended: cleared all rounds, or missed quota.
     Over { won: bool },
 }
@@ -51,8 +58,9 @@ pub struct Game {
     pub credits: u32,
     pub phase: GamePhase,
     pub board: Vec<Placement>,
-    pub deck: Deck,
+    /// Persistent blueprint inventory, capped at [`HAND_MAX`].
     pub hand: Vec<Card>,
+    /// The shop rack while `phase == Shop`.
     pub offers: Vec<Card>,
     pub unlocked: Vec<MachineId>,
     pub history: Vec<RoundOutcome>,
@@ -62,9 +70,7 @@ pub struct Game {
 
 impl Game {
     pub fn new(seed: u32) -> Game {
-        let mut rng = Rng::new(seed);
-        let mut deck = Deck::starting(&mut rng);
-        let hand = deck.draw(HAND_SIZE, &mut rng);
+        let rng = Rng::new(seed);
         // The Vault starts bolted to the east edge, as in the design doc.
         let board = vec![Placement::new(BOARD_W - 1, 3, MachineId::Vault, None)];
         Game {
@@ -72,8 +78,7 @@ impl Game {
             credits: STARTING_CREDITS,
             phase: GamePhase::Build,
             board,
-            deck,
-            hand,
+            hand: starting_hand(),
             offers: Vec::new(),
             unlocked: default_unlocked(),
             history: Vec::new(),
@@ -94,24 +99,36 @@ impl Game {
         x >= 0 && y >= 0 && x < BOARD_W && y < BOARD_H
     }
 
-    /// Lay a belt — infrastructure, not a card. 1 credit.
-    pub fn buy_belt(&mut self, x: i32, y: i32, d: Dir) -> Result<(), String> {
+    fn buy_infra(&mut self, x: i32, y: i32, m: MachineId, d: Option<Dir>) -> Result<(), String> {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
         }
-        let cost = def(MachineId::Belt).cost;
+        let cost = def(m).cost;
         if self.credits < cost {
-            return Err("cannot afford belt".into());
+            return Err(format!("cannot afford {}", def(m).name));
         }
         if !Self::in_bounds(x, y) || self.occupied(x, y) {
             return Err(format!("tile {},{} unavailable", x, y));
         }
         self.credits -= cost;
-        self.board.push(Placement::new(x, y, MachineId::Belt, Some(d)));
+        let mut p = Placement::new(x, y, m, d);
+        p.d2 = None;
+        self.board.push(p);
         Ok(())
     }
 
-    /// Play a card from the hand: place its machine. Consumes the card.
+    /// Lay a belt — infrastructure, not a card. 1 credit.
+    pub fn buy_belt(&mut self, x: i32, y: i32, d: Dir) -> Result<(), String> {
+        self.buy_infra(x, y, MachineId::Belt, Some(d))
+    }
+
+    /// Place a junction — the crossing tile. Infrastructure, no orientation.
+    pub fn buy_junction(&mut self, x: i32, y: i32) -> Result<(), String> {
+        self.buy_infra(x, y, MachineId::Junction, None)
+    }
+
+    /// Play a blueprint from the hand: place its machine. Free — the card
+    /// was paid for at the shop.
     pub fn play_card(
         &mut self,
         hand_idx: usize,
@@ -125,13 +142,9 @@ impl Game {
             return Err("not in build phase".into());
         }
         let card = *self.hand.get(hand_idx).ok_or("no such card in hand")?;
-        if self.credits < card.cost() {
-            return Err(format!("cannot afford {}", def(card.machine).name));
-        }
         if !Self::in_bounds(x, y) || self.occupied(x, y) {
             return Err(format!("tile {},{} unavailable", x, y));
         }
-        self.credits -= card.cost();
         self.hand.remove(hand_idx);
         let mut p = Placement::new(x, y, card.machine, d);
         p.d2 = d2;
@@ -140,7 +153,8 @@ impl Game {
         Ok(())
     }
 
-    /// Remove a placed machine: full credit refund, card back to the discard.
+    /// Remove a placed machine. Infrastructure (belts, junctions) refunds its
+    /// credits; a real machine goes back to the hand as its blueprint.
     pub fn sell(&mut self, x: i32, y: i32) -> Result<(), String> {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
@@ -150,11 +164,28 @@ impl Game {
             .iter()
             .position(|p| p.x == x && p.y == y && p.m != MachineId::Vault)
             .ok_or("nothing sellable there")?;
-        let p = self.board.remove(i);
-        self.credits += def(p.m).cost;
-        if def(p.m).kind != Kind::Logistics || p.m != MachineId::Belt {
-            self.deck.to_discard(Card { machine: p.m });
+        let m = self.board[i].m;
+        if matches!(m, MachineId::Belt | MachineId::Junction) {
+            self.board.remove(i);
+            self.credits += def(m).cost;
+        } else {
+            if self.hand.len() >= HAND_MAX {
+                return Err("hand is full — sell a blueprint first".into());
+            }
+            self.board.remove(i);
+            self.hand.push(Card { machine: m });
         }
+        Ok(())
+    }
+
+    /// Sell a blueprint out of the hand for half its shop price.
+    pub fn sell_blueprint(&mut self, hand_idx: usize) -> Result<(), String> {
+        if matches!(self.phase, GamePhase::Over { .. }) {
+            return Err("run is over".into());
+        }
+        let card = *self.hand.get(hand_idx).ok_or("no such card in hand")?;
+        self.hand.remove(hand_idx);
+        self.credits += card.sell_value();
         Ok(())
     }
 
@@ -285,29 +316,51 @@ impl Game {
             if self.round + 1 >= QUOTAS.len() {
                 self.phase = GamePhase::Over { won: true };
             } else {
-                self.offers = Deck::offers(&self.unlocked, 3, &mut self.rng);
-                self.phase = GamePhase::Reward;
+                self.offers = shop_offers(&self.unlocked, SHOP_SIZE, &mut self.rng);
+                self.phase = GamePhase::Shop;
             }
         }
         Ok(self.history.last().unwrap())
     }
 
-    /// Pick a reward card (or None to skip). Unplayed hand discards, a fresh
-    /// hand is dealt, and the next round begins.
-    pub fn pick_reward(&mut self, offer_idx: Option<usize>) -> Result<(), String> {
-        if self.phase != GamePhase::Reward {
-            return Err("no reward pending".into());
+    /// Buy the shop offer at `offer_idx` into the hand.
+    pub fn shop_buy(&mut self, offer_idx: usize) -> Result<(), String> {
+        if self.phase != GamePhase::Shop {
+            return Err("the shop is closed".into());
         }
-        if let Some(i) = offer_idx {
-            let c = *self.offers.get(i).ok_or("no such offer")?;
-            self.deck.to_discard(c);
+        let card = *self.offers.get(offer_idx).ok_or("no such offer")?;
+        if self.credits < card.cost() {
+            return Err(format!("cannot afford {}", def(card.machine).name));
+        }
+        if self.hand.len() >= HAND_MAX {
+            return Err("hand is full — sell a blueprint first".into());
+        }
+        self.credits -= card.cost();
+        self.offers.remove(offer_idx);
+        self.hand.push(card);
+        Ok(())
+    }
+
+    /// Swap the rack for a fresh one, for [`REROLL_COST`].
+    pub fn shop_reroll(&mut self) -> Result<(), String> {
+        if self.phase != GamePhase::Shop {
+            return Err("the shop is closed".into());
+        }
+        if self.credits < REROLL_COST {
+            return Err("cannot afford a reroll".into());
+        }
+        self.credits -= REROLL_COST;
+        self.offers = shop_offers(&self.unlocked, SHOP_SIZE, &mut self.rng);
+        Ok(())
+    }
+
+    /// Leave the shop and start the next round.
+    pub fn shop_done(&mut self) -> Result<(), String> {
+        if self.phase != GamePhase::Shop {
+            return Err("the shop is closed".into());
         }
         self.offers.clear();
-        for c in self.hand.drain(..) {
-            self.deck.to_discard(c);
-        }
         self.round += 1;
-        self.hand = self.deck.draw(HAND_SIZE, &mut self.rng);
         self.phase = GamePhase::Build;
         Ok(())
     }

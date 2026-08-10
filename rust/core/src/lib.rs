@@ -12,7 +12,7 @@
 //! an engine type.
 
 pub mod boards;
-pub mod deck;
+pub mod cards;
 pub mod defs;
 pub mod rng;
 pub mod run;

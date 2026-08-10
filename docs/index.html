@@ -463,16 +463,17 @@
   <h2>7 · The six phases of a round</h2>
 
   <div class="callout teal">
-    <span class="k">Design delta — 2026-08-10: the shop became a deck</span>
-    <p>The acquisition layer described below and in the §8 walkthrough — a credit shop that rolls
-      machines each round — has been superseded by <strong>blueprint cards</strong>: a run deck, a hand
-      dealt each round (you can only place what you were dealt), placing consumes the card, selling
-      refunds it, and each cleared shift adds one offered card to the deck. Belts stay 1-credit
-      infrastructure. This is what the playable build runs (<code>rust/core/src/deck.rs</code>).
-      The shop prose below stands as the pre-card record until the walkthrough is re-authored against
-      measured card-mode runs; the boards, quotas and payouts it quotes are unaffected — they depend on
-      the sim, not on how machines are acquired. Open questions on the card design live in
-      <code>NOTES.md</code>.</p>
+    <span class="k">Design delta — 2026-08-10: shop → deck → shop-of-blueprints</span>
+    <p>The acquisition layer went through two revisions in one day. First the credit shop described
+      below became a <strong>deck of dealt cards</strong> (one reward pick per round) — which the lab
+      then killed: with acquisition capped at one card per round against a ~1.9× quota curve, every
+      player and every bot died at round 4, and credits piled up with no sink. The current design
+      (<code>rust/core/src/cards.rs</code>) is a <strong>shop of owned blueprints</strong>: a
+      persistent hand (max 10), a 5-offer rack after every cleared shift, buy with surplus, reroll
+      for 5c, placement free, removal back to hand, sell from hand at half. Measured result:
+      the widening-only bot's wall moved from round 4 (acquisition-starved) to round 5 (board
+      geometry) — the wall the pillars actually intend. The walkthrough below still narrates the
+      original shop pacing; its boards and payouts are sim-accurate either way.</p>
   </div>
 
   <p>Every round is the same six beats. Phases 1–3 are untimed and deliberate; phase 4 is the payoff you

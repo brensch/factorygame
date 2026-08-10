@@ -72,7 +72,7 @@ fn a_whole_round_through_the_wire_format() {
         call(belt(x, 3, E));
     }
     let s = call(state());
-    assert_eq!(num(&s, "credits"), 15 - 3 - 5 - 7);
+    assert_eq!(num(&s, "credits"), 15 - 7); // placement is free; belts aren't
 
     // Projection clears the quota before we commit.
     let p = call(project());
@@ -104,20 +104,30 @@ fn a_whole_round_through_the_wire_format() {
     }
     assert!(saw_items, "no items ever appeared on the belts");
 
-    // Commit matches what was watched, and the round advances.
+    // Commit matches what was watched, and the shop opens.
     let s = call(shift_finish());
-    assert_eq!(field(&s, "phase"), "reward");
+    assert_eq!(field(&s, "phase"), "shop");
     let cleared_payout = num(&s, "payout");
     assert!(cleared_payout >= 20);
-    assert_eq!(num(&s, "nextQuota"), 45, "reward modal advertises the NEXT round: {s}");
+    assert_eq!(num(&s, "nextQuota"), 45, "shop advertises the NEXT round: {s}");
     let offers_at = s.find("\"offers\":[").unwrap();
     let offers = &s[offers_at..offers_at + s[offers_at..].find(']').unwrap()];
-    assert_eq!(offers.matches("\"name\":").count(), 3, "three offers: {s}");
+    assert_eq!(offers.matches("\"name\":").count(), 5, "a full rack: {s}");
 
-    let s = call(pick_reward(0));
+    // Buy one (surplus covers any rack price), reroll, then leave.
+    let credits = num(&s, "credits");
+    let s = call(shop_buy(0));
+    assert_eq!(field(&s, "err"), "null", "{s}");
+    assert!(num(&s, "credits") < credits);
+    let before_reroll = num(&s, "credits");
+    let s = call(shop_reroll());
+    assert_eq!(num(&s, "credits"), before_reroll - 5);
+
+    let s = call(shop_done());
     assert_eq!(field(&s, "phase"), "build");
     assert_eq!(num(&s, "round"), 1);
     assert_eq!(num(&s, "quota"), 45);
+    assert_eq!(hand(&s).len(), 3, "2 unplayed + 1 bought: {s}");
 }
 
 #[test]
@@ -234,8 +244,9 @@ fn catalog_carries_recipes_auras_and_values() {
     assert!(s.contains("\"gear\":16"), "{s}");
     // behaviour blurbs quote the real balance constant
     assert!(s.contains("15% chance"), "dup blurb uses DUP_CLONE_CHANCE: {s}");
-    // every card machine plus belt and vault is described
-    assert_eq!(s.matches("\"blurb\":").count(), 21, "{s}");
+    // every card machine plus belt, junction and vault is described
+    assert_eq!(s.matches("\"blurb\":").count(), 22, "{s}");
+    assert!(s.contains("\"m\":\"junction\""), "{s}");
 }
 
 #[test]

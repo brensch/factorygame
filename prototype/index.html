@@ -101,6 +101,8 @@
   .off{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;padding:14px 12px;
        cursor:pointer;text-align:center;transition:.1s}
   .off:hover{border-color:var(--ink);transform:translateY(-2px)}
+  .off.no{opacity:.4;cursor:not-allowed}
+  .off.no:hover{border-color:var(--line);transform:none}
   .off .sw{width:34px;height:34px;border-radius:8px;margin:0 auto 8px;display:grid;place-items:center;
            font:700 10px/1 var(--mono);color:#0b0e13}
   .off .nm{font-size:13px;font-weight:650;margin-bottom:4px}
@@ -164,16 +166,18 @@
     <div class="sec">
       <h2>Controls</h2>
       <div id="hint">
-        <b>Click a card</b>, then a tile, to place it — the card is consumed.<br>
+        <b>Click a blueprint</b>, then a tile, to place it — placing is free.<br>
         <b>Drag</b> with Belt selected to lay a run.<br>
         <b>Click</b> a placed machine to select, again to rotate.<br>
         <b>Drag a machine</b> to move it. <b>Shift+drag</b> selects a group —
         it moves as one piece.<br>
-        <b>Right-click</b> to sell (full refund, card back to deck).<br>
+        <b>Right-click</b> a machine to pull it back to your hand;
+        right-click a hand card to sell it for half.<br>
         Ports: <b style="color:#6fcf5f">green</b> flowing ·
         <b style="color:#5a6a7d">grey</b> open end ·
         <b style="color:#ff5d5d">red</b> won't accept.<br>
-        <kbd>R</kbd> rotate · <kbd>B</kbd> belt · <kbd>1-9</kbd> pick card · <kbd>Space</kbd> run
+        <kbd>R</kbd> rotate · <kbd>B</kbd> belt · <kbd>J</kbd> junction ·
+        <kbd>1-9</kbd> pick card · <kbd>Space</kbd> run
       </div>
     </div>
   </aside>

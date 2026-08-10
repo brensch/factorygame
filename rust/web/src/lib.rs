@@ -17,7 +17,7 @@ use overflow_core::defs::{
     def, Dir, ItemType, Kind, MachineId, Tag, CARD_POOL, DUP_CLONE_CHANCE, QUALITY_CAP,
     QUALITY_STEP,
 };
-use overflow_core::deck::Card;
+use overflow_core::cards::Card;
 use overflow_core::run::{is_audit, shift_len, Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
 use overflow_core::sim::{FilterCfg, Placement, Sim};
 use std::cell::RefCell;
@@ -134,10 +134,34 @@ pub extern "C" fn sel_move(dx: i32, dy: i32) -> usize {
     })
 }
 
-/// Take the reward at `offer_idx`, or skip with -1.
+/// Place a junction — crossing infrastructure, no orientation.
 #[no_mangle]
-pub extern "C" fn pick_reward(offer_idx: i32) -> usize {
-    command(|g| g.pick_reward((offer_idx >= 0).then_some(offer_idx as usize)))
+pub extern "C" fn junction(x: i32, y: i32) -> usize {
+    command(|g| g.buy_junction(x, y))
+}
+
+/// Buy the shop offer at `offer_idx` into the hand.
+#[no_mangle]
+pub extern "C" fn shop_buy(offer_idx: u32) -> usize {
+    command(|g| g.shop_buy(offer_idx as usize))
+}
+
+/// Swap the shop rack for a fresh one.
+#[no_mangle]
+pub extern "C" fn shop_reroll() -> usize {
+    command(|g| g.shop_reroll())
+}
+
+/// Leave the shop; the next round begins.
+#[no_mangle]
+pub extern "C" fn shop_done() -> usize {
+    command(|g| g.shop_done())
+}
+
+/// Sell the hand blueprint at `hand_idx` for half its price.
+#[no_mangle]
+pub extern "C" fn sell_hand(hand_idx: u32) -> usize {
+    command(|g| g.sell_blueprint(hand_idx as usize))
 }
 
 /// Dry-run the whole shift: `{"payout":..,"inFlight":..,"jamTicks":..}`.
@@ -255,6 +279,7 @@ fn machine_key(m: MachineId) -> &'static str {
         M::LensGrinder => "lens",
         M::EngineWorks => "engine",
         M::Belt => "belt",
+        M::Junction => "junction",
         M::Merger => "merger",
         M::Splitter => "splitter",
         M::Buffer => "buffer",
@@ -324,6 +349,7 @@ fn blurb(m: MachineId) -> String {
         M::LensGrinder => "Shard + Resin → Lens. Marries the precision and organic chains.".into(),
         M::EngineWorks => "Gear + Circuit → Engine. Top of the chain, 64 base value.".into(),
         M::Belt => "Moves one item per tick in its arrow direction. 1 credit, always available, never a card.".into(),
+        M::Junction => "Crossing: items pass straight through and exit the way they entered. Two lanes share the tile without mixing — the piece that makes loop geometry buildable.".into(),
         M::Merger => "A belt that accepts from every side and sends everything out one edge. Joins lanes.".into(),
         M::Splitter => "Alternates items between its two output edges, one-for-one. Splits a lane fairly.".into(),
         M::Buffer => "Currently behaves as a plain belt — its hold-and-release policy is an open design question (NOTES.md).".into(),
@@ -429,7 +455,7 @@ fn catalog_json() -> String {
     for (i, m) in CARD_POOL
         .iter()
         .copied()
-        .chain([MachineId::Belt, MachineId::Vault])
+        .chain([MachineId::Belt, MachineId::Junction, MachineId::Vault])
         .enumerate()
     {
         if i > 0 {
@@ -511,7 +537,7 @@ fn push_placement(out: &mut String, p: &Placement) {
 fn state_json(g: &Game, err: Option<&str>) -> String {
     let (phase, won) = match g.phase {
         GamePhase::Build => ("build", false),
-        GamePhase::Reward => ("reward", false),
+        GamePhase::Shop => ("shop", false),
         GamePhase::Over { won } => ("over", won),
     };
     let mut s = String::with_capacity(2048);
@@ -531,10 +557,10 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         BOARD_H,
     );
 
-    // During the reward phase the modal advertises the round about to start,
-    // which the game hasn't advanced to yet.
+    // During the shop the modal advertises the round about to start, which
+    // the game hasn't advanced to yet.
     match g.phase {
-        GamePhase::Reward if g.round + 1 < QUOTAS.len() => {
+        GamePhase::Shop if g.round + 1 < QUOTAS.len() => {
             let next = g.round + 1;
             let _ = write!(
                 s,
@@ -569,9 +595,9 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
     }
     let _ = write!(
         s,
-        "],\"deckDraw\":{},\"deckDiscard\":{},",
-        g.deck.draw_count(),
-        g.deck.discard_count()
+        "],\"handMax\":{},\"rerollCost\":{},",
+        overflow_core::run::HAND_MAX,
+        overflow_core::run::REROLL_COST
     );
 
     // The flow graph: every output edge on the board, and whether the tile it
@@ -586,7 +612,9 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
     for p in &g.board {
         let d = def(p.m);
         let emitter = d.transport || d.produces.is_some() || d.recipe.is_some();
-        if !emitter {
+        // A junction's exit depends on each item's entry — it has no static
+        // edge to draw. Upstream ports still show green into it.
+        if !emitter || p.m == MachineId::Junction {
             continue;
         }
         // What this tile is known to emit; None for transport (cargo unknown).

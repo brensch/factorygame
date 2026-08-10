@@ -114,18 +114,33 @@ impl LaneBot {
         }
     }
 
-    /// Reward preference: multipliers first, then more lane throughput.
-    fn pick(&self, g: &Game) -> Option<usize> {
+    /// Shop strategy: buy every preferred card affordable (multipliers first,
+    /// then lane throughput), rerolling a few times while flush to fish.
+    fn shop(&self, g: &mut Game) {
         const PREF: [MachineId; 5] = [
             MachineId::Polisher, MachineId::Heatsink, MachineId::Drill,
             MachineId::Furnace, MachineId::Overclock,
         ];
-        for want in PREF {
-            if let Some(i) = g.offers.iter().position(|c| c.machine == want) {
-                return Some(i);
+        let mut rerolls = 0;
+        loop {
+            let mut bought = false;
+            for want in PREF {
+                while let Some(i) = g.offers.iter().position(|c| c.machine == want) {
+                    if g.shop_buy(i).is_err() {
+                        break;
+                    }
+                    bought = true;
+                }
+            }
+            if !bought {
+                if rerolls < 4 && g.credits > 25 && g.shop_reroll().is_ok() {
+                    rerolls += 1;
+                    continue;
+                }
+                break;
             }
         }
-        Some(0)
+        g.shop_done().unwrap();
     }
 }
 
@@ -147,9 +162,8 @@ fn play_one(seed: u32) -> RunRecord {
                 bot.build(&mut g);
                 g.run_shift().expect("bot placed something illegal");
             }
-            GamePhase::Reward => {
-                let pick = bot.pick(&g);
-                g.pick_reward(pick).unwrap();
+            GamePhase::Shop => {
+                bot.shop(&mut g);
             }
             GamePhase::Over { .. } => break,
         }

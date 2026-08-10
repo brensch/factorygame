@@ -24,7 +24,8 @@ type Exports = {
   shift_start(): number;
   shift_step(): number;
   shift_finish(): number;
-  pick_reward(i: number): number;
+  shop_buy(i: number): number;
+  shop_done(): number;
 };
 
 async function load(): Promise<{ core: Exports; read: (len: number) => any }> {
@@ -59,7 +60,7 @@ test("the shipped wasm plays a full round over the ABI", async () => {
     s = read(core.belt(x, 3, E));
     expect(s.err).toBeNull();
   }
-  expect(s.credits).toBe(15 - 3 - 5 - 7);
+  expect(s.credits).toBe(15 - 7); // placement is free; belts aren't
 
   const p = read(core.project());
   expect(p.payout).toBeGreaterThanOrEqual(20);
@@ -82,12 +83,19 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   expect(sawVaultHop).toBe(true);
 
   s = read(core.shift_finish());
-  expect(s.phase).toBe("reward");
+  expect(s.phase).toBe("shop");
   expect(s.last.cleared).toBe(true);
   expect(s.last.payout).toBe(frame.payout); // what you watched is what you got
-  expect(s.offers.length).toBe(3);
+  expect(s.offers.length).toBe(5);
+  expect(s.nextQuota).toBe(45);
 
-  s = read(core.pick_reward(0));
+  // the surplus buys a blueprint into the persistent hand
+  const handBefore = s.hand.length;
+  s = read(core.shop_buy(0));
+  expect(s.err).toBeNull();
+  expect(s.hand.length).toBe(handBefore + 1);
+
+  s = read(core.shop_done());
   expect(s.phase).toBe("build");
   expect(s.round).toBe(1);
   expect(s.quota).toBe(45);

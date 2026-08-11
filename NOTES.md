@@ -189,6 +189,23 @@ and outputs." Extractors are gone. The factory is a processor now.
 - Legibility: an amber shift clock burns under the quota meter, per-slot
   depletion bars live on the bay tiles, and the run button names the shift.
 
+## v3.4 (2026-08-11) — money is a wage, not a conversion
+
+- **Throughput and money decoupled.** Clearing the day pays a wage: base
+  (35 + 10/day seniority) + 15 per unused shift ("crew home early") +
+  interest (1 per 5 held, cap 25 — doubled by the new Offshore Accounts
+  contract). Overshoot buys safety, not salary. The pay-slip is itemized
+  Balatro-style at day end.
+- Shop prices now follow the wage curve (gentle seniority growth), not the
+  quota curve — no more quota-driven hyperinflation.
+- Term contract rewards rebalanced for wage scale (Gear Futures 120).
+- **Contracts tray**: gold cards in a row under the header — term progress
+  bars, right-click to sell, drag one onto another to reorder.
+- Lab after retune (the bot needed a day-1 belt reserve once rerolls got
+  cheap): zero day-1 deaths, deaths spread days 2–6, ratios 1.09 → 0.56
+  declining. Hoarding now has real texture: spend on capacity vs sit on
+  savings for interest is a per-day decision.
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

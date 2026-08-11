@@ -55,7 +55,31 @@ impl DockBot {
         g.board.iter().any(|p| Game::cells_of(p).contains(&(x, y)))
     }
 
+    /// Slot every pure-ore card in the supply hand; discard the rest (a
+    /// filterless furnace line jams on anything else).
+    fn slot_supplies(g: &mut Game) {
+        let mut bay = 0;
+        let i = 0;
+        while i < g.supply_hand.len() {
+            let pure_ore =
+                g.supply_hand[i].runs.iter().all(|r| r.0 == overflow_core::defs::ItemType::Ore);
+            if !pure_ore {
+                g.supply_hand.remove(i);
+                continue;
+            }
+            if g.allocate(i, bay).is_err() {
+                bay = (bay + 1) % g.bay_slots.len();
+                if g.allocate(i, bay).is_err() {
+                    break; // both bays full
+                }
+            }
+            bay = (bay + 1) % g.bay_slots.len();
+        }
+    }
+
     fn build(&mut self, g: &mut Game) {
+        // fresh consignments are dealt every shift: slot them every shift
+        Self::slot_supplies(g);
         // The fab in the starting kit is dead weight for a widening bot.
         if let Some(i) = g.hand.iter().position(|c| c.machine == MachineId::Fab) {
             let _ = g.sell_blueprint(i);
@@ -143,11 +167,13 @@ impl DockBot {
     /// whole supply hand across the bays, alternating.
     fn supply(&self, g: &mut Game) {
         let mut rerolls = 0;
+        // day 1 needs its belt budget more than extra ore
+        let reserve = if g.round == 0 { 45 } else { 10 };
         loop {
             let pick = g.lot_offers.iter().position(|l| {
                 l.entries.iter().any(|e| e.0 == ItemType::Ore)
                     && !l.entries.iter().any(|e| e.0 == ItemType::Slag)
-                    && g.credits >= l.price + 10
+                    && g.credits >= l.price + reserve
             });
             match pick {
                 Some(i) => {
@@ -164,26 +190,7 @@ impl DockBot {
                 }
             }
         }
-        // allocate only PURE ORE cards (a furnace line jams on anything
-        // else), alternating bays; discard the rest — the bot knows its
-        // limits.
-        let mut bay = 0;
-        let i = 0;
-        while i < g.supply_hand.len() {
-            let pure_ore =
-                g.supply_hand[i].runs.iter().all(|r| r.0 == overflow_core::defs::ItemType::Ore);
-            if !pure_ore {
-                g.supply_hand.remove(i);
-                continue;
-            }
-            if g.allocate(i, bay).is_err() {
-                bay = (bay + 1) % g.bay_slots.len();
-                if g.allocate(i, bay).is_err() {
-                    break; // both bays full
-                }
-            }
-            bay = (bay + 1) % g.bay_slots.len();
-        }
+        Self::slot_supplies(g);
         g.supply_done().unwrap();
     }
 

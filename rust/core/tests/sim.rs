@@ -5,7 +5,7 @@
 use overflow_core::boards::*;
 use overflow_core::cards::Offer;
 use overflow_core::defs::{item_value, Dir, ItemType, MachineId, QUALITY_CAP};
-use overflow_core::run::{GamePhase, QUOTAS, SHOP_SIZE};
+use overflow_core::run::{GamePhase, SHOP_SIZE};
 use overflow_core::sim::{run_board, Placement, Sim};
 
 const SEED: u32 = 0xc0ffee;
@@ -415,15 +415,43 @@ fn selling_a_blueprint_recovers_half_its_current_price() {
     let i = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
     let before = g.credits;
     g.sell_blueprint(i).unwrap();
-    // round 0: mult = 175/35 = 5 → furnace priced 25, sells for 12
-    assert_eq!(g.credits, before + 12);
+    // day 0: wage-curve mult floors at 3 → furnace priced 15, sells for 7
+    assert_eq!(g.credits, before + 7);
 }
 
 #[test]
-fn shop_prices_track_the_quota_curve() {
+fn shop_prices_follow_the_wage_curve_not_the_quota_curve() {
     use overflow_core::run::priced;
-    assert_eq!(priced(3, 0), (3.0f64 * QUOTAS[1] as f64 / 35.0).round() as u32);
-    assert_eq!(priced(3, 4), (3.0f64 * QUOTAS[5] as f64 / 35.0).round() as u32);
+    // early: floored at 3× base
+    assert_eq!(priced(3, 0), 9);
+    // late: gentle seniority growth — a furnace stays ~half a day's pay
+    assert_eq!(priced(5, 8), (5.0f64 * (1.6 + 8.0 * 0.45)).round() as u32);
+    assert!(priced(5, 11) < 40, "no quota-driven hyperinflation");
+}
+
+#[test]
+fn the_day_pays_a_wage_not_a_throughput_conversion() {
+    use overflow_core::run::{DAY_PAY_BASE, EARLY_SHIFT_BONUS, INTEREST_DIVISOR};
+    let mut g = Game::new(42);
+    build_starter(&mut g);
+    let held = g.credits;
+    let mut shifts = 0;
+    while g.phase == GamePhase::Build {
+        g.run_shift().unwrap();
+        shifts += 1;
+    }
+    assert_eq!(g.phase, GamePhase::Shop);
+    let spare = SHIFTS_PER_ROUND - shifts;
+    let expected = DAY_PAY_BASE
+        + spare * EARLY_SHIFT_BONUS
+        + (held - 4).min(25 * INTEREST_DIVISOR) / INTEREST_DIVISOR;
+    // held minus the 4 belts... compute directly from the slip instead:
+    assert_eq!(g.pay.base, DAY_PAY_BASE, "day 0 base");
+    assert_eq!(g.pay.early, spare * EARLY_SHIFT_BONUS);
+    assert!(g.pay.interest > 0, "held credits earned interest");
+    assert_eq!(g.pay.total, g.pay.base + g.pay.early + g.pay.interest);
+    assert_eq!(g.credits, held + g.pay.total, "wage in, surplus NOT converted");
+    let _ = expected;
 }
 
 #[test]

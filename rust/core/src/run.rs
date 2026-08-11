@@ -36,18 +36,38 @@ pub const REROLL_BASE: u32 = 2;
 /// Enough to plumb the starting kit across the big board: trunk, two or
 /// three furnace lanes, and the spine to the vault.
 pub const STARTING_CREDITS: u32 = 75;
+
+// ── the wage structure: money is decoupled from throughput ──────────────────
+/// Base pay for clearing a day's quota.
+pub const DAY_PAY_BASE: u32 = 35;
+/// Seniority: the base grows by this much per day survived.
+pub const DAY_PAY_PER_DAY: u32 = 10;
+/// Sent the crew home early: per unused shift.
+pub const EARLY_SHIFT_BONUS: u32 = 15;
+/// Interest: 1 credit per this many held, paid at day end…
+pub const INTEREST_DIVISOR: u32 = 5;
+/// …up to this cap (doubled by Offshore Accounts).
+pub const INTEREST_CAP: u32 = 25;
+
+/// The end-of-day cash-out, itemized for the pay-slip screen.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct PaySlip {
+    pub base: u32,
+    pub early: u32,
+    pub interest: u32,
+    pub term_rewards: u32,
+    pub total: u32,
+}
 /// The spot market pays this multiple for the in-demand item.
 pub const MARKET_MULT: f64 = 2.0;
 /// Audit inspections slow the inspected tag to this fraction.
 pub const AUDIT_SPEED_PENALTY: f64 = 0.6;
 
-/// Shop inflation: prices track the quota curve so a purchase stays a real
-/// decision all run. The floor matters as much as the slope — early quotas
-/// are trivially overshot with the starting kit, so early prices sitting at
-/// ~1× base is what let a good first round buy the whole rack.
+/// Shop inflation now follows the WAGE curve, not the quota curve — income
+/// is a day wage, so prices grow gently with seniority and a purchase stays
+/// a ~half-a-day-of-pay decision all run.
 pub fn shop_price_mult(round: usize) -> f64 {
-    let next = (round + 1).min(QUOTAS.len() - 1);
-    (QUOTAS[next] as f64 / 35.0).max(3.0)
+    (1.6 + round as f64 * 0.45).max(3.0)
 }
 
 /// A base price scaled for the shop of the given round.
@@ -259,6 +279,8 @@ pub struct Game {
     pub audit_tag: Option<Tag>,
     pub unlocked: Vec<MachineId>,
     pub history: Vec<RoundOutcome>,
+    /// The most recent end-of-day cash-out, for the pay-slip screen.
+    pub pay: PaySlip,
     /// Rerolls taken in the current shop; escalates the price.
     rerolls: u32,
     rng: Rng,
@@ -308,6 +330,7 @@ impl Game {
             audit_tag: None,
             unlocked: default_unlocked(),
             history: Vec::new(),
+            pay: PaySlip::default(),
             rerolls: 0,
             rng,
             seed,
@@ -817,11 +840,24 @@ impl Game {
         self.history.push(RoundOutcome { round: self.round, result, quota, cleared });
 
         if cleared {
-            let surplus = (self.round_delivered - quota) as u32;
+            // The day is done: money is a WAGE, not a conversion of
+            // throughput. Overshoot buys safety, not salary.
             let spare = SHIFTS_PER_ROUND - self.shifts_used;
-            self.credits += surplus + spare * (quota as u32 / 10);
-            // the day is over: the floor is swept — leftover material in
-            // bays and pipes doesn't survive the night
+            let cap = INTEREST_CAP * if self.has_contract(ContractId::Offshore) { 2 } else { 1 };
+            let pay = PaySlip {
+                base: DAY_PAY_BASE + DAY_PAY_PER_DAY * self.round as u32,
+                early: spare * EARLY_SHIFT_BONUS,
+                interest: (self.credits / INTEREST_DIVISOR).min(cap),
+                term_rewards: 0, // settled at shop_done, shown separately
+                total: 0,
+            };
+            self.pay = PaySlip {
+                total: pay.base + pay.early + pay.interest,
+                ..pay
+            };
+            self.credits += self.pay.total;
+            // the floor is swept — leftover material in bays and pipes
+            // doesn't survive the night
             self.carry.clear();
             self.supply_hand.clear();
             for slots in self.bay_slots.iter_mut() {
@@ -901,6 +937,15 @@ impl Game {
         self.credits -= price;
         self.contract_offers.remove(idx);
         self.contracts.push(ContractInst::new(id));
+        Ok(())
+    }
+
+    /// Swap two contracts in the tray — order is yours to arrange.
+    pub fn contract_swap(&mut self, a: usize, b: usize) -> Result<(), String> {
+        if a >= self.contracts.len() || b >= self.contracts.len() {
+            return Err("no such contract".into());
+        }
+        self.contracts.swap(a, b);
         Ok(())
     }
 
@@ -997,6 +1042,8 @@ impl Game {
             true
         });
         self.credits += reward_total;
+        self.pay.term_rewards = reward_total;
+        self.pay.total += reward_total;
 
         self.round += 1;
         self.shifts_used = 0;

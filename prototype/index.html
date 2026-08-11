@@ -44,6 +44,18 @@
   #timeBar{display:block;height:100%;width:0;background:var(--extractor)}
 
   #dirList{display:flex;gap:4px}
+  #conTray{display:flex;gap:6px;padding:5px 10px 0;background:var(--surface);flex-wrap:wrap}
+  #conTray:empty{display:none}
+  .ccard{background:linear-gradient(180deg,#242015,#1a1710);border:1px solid #e8c86a66;
+         border-radius:9px;padding:6px 10px;min-width:130px;cursor:grab;user-select:none}
+  .ccard:hover{border-color:#e8c86a}
+  .cname{font:700 11px/1.2 var(--sans);color:#e8c86a}
+  .csub{font:600 9.5px/1.3 var(--mono);color:var(--ink-muted);margin-top:2px}
+  .cbar{height:3px;border-radius:2px;background:#12161d;margin-top:3px;overflow:hidden}
+  .cbar i{display:block;height:100%;background:#e8c86a}
+  .payslip{background:var(--surface-2);border:1px solid var(--line);border-radius:10px;
+           padding:9px 12px;margin:10px 0}
+  .payslip .kv{padding:2px 0;font-size:13px}
   .dchip{display:inline-flex;align-items:center;gap:3px;border:1px solid;border-radius:7px;
          padding:5px 7px;font:700 11px/1 var(--mono)}
 
@@ -218,6 +230,8 @@
   <div id="dirList"></div>
   <button id="bHelp" title="controls">?</button>
 </header>
+
+<div id="conTray"></div>
 
 <main>
   <div id="stage"><canvas id="cv"></canvas></div>

@@ -40,6 +40,7 @@ interface State {
   bays: BayState[]; lotOffers: LotOffer[]; supplyHand: SlotLot[];
   contracts: OwnedContract[]; contractOffers: ContractOffer[];
   shiftsUsed: number; shiftsMax: number; roundDelivered: number; carry: number;
+  pay: { base: number; early: number; interest: number; termRewards: number; total: number };
   directives: OwnedDirective[];
   handMax: number; rerollPrice: number; priceMult: number;
   market: string; marketMult: number; auditTag: string | null;
@@ -99,6 +100,7 @@ const core = wasm.instance.exports as {
   supply_done(): number;
   buy_contract(i: number): number;
   sell_contract(i: number): number;
+  contract_swap(a: number, b: number): number;
   set_type_gate(x: number, y: number, ty: number): number;
   retry(): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
@@ -1022,19 +1024,42 @@ function paintDirectives() {
     .map((d) =>
       `<span class="dchip" style="border-color:${TAG_COLOR[d.tag]}88;color:${TAG_COLOR[d.tag]}"
         title="${d.name}">◆${d.n > 1 ? `×${d.n}` : ""}</span>`)
-    .join("") + G.contracts
+    .join("");
+
+  // the contracts tray: your deals, front and centre — drag to reorder,
+  // right-click to sell
+  const tray = document.getElementById("conTray")!;
+  tray.innerHTML = G.contracts
     .map((c, i) => {
       const t = c.term;
-      const label = t ? `★${t.progress}/${t.need}·${t.roundsLeft}r` : "★";
-      return `<span class="dchip cchip" data-ci="${i}" style="border-color:#e8c86a88;color:#e8c86a"
-        title="${c.name} — right-click to sell for ◈${Math.floor(c.price / 2)}">${label}</span>`;
+      const pct = t ? Math.min(100, Math.round(((t.progress ?? 0) / t.need) * 100)) : 0;
+      const sub = t
+        ? `<div class="csub">${t.progress ?? 0}/${t.need} ${capName(t.item)} · ${t.roundsLeft}d → ◈${t.reward}</div>
+           <div class="cbar"><i style="width:${pct}%"></i></div>`
+        : `<div class="csub">ongoing</div>`;
+      return `<div class="ccard" draggable="false" data-ci="${i}"
+          title="right-click: sell for ◈${Math.floor(c.price / 2)} · drag onto another to reorder">
+        <div class="cname">★ ${c.name}</div>${sub}</div>`;
     })
     .join("");
-  document.querySelectorAll<HTMLElement>(".cchip").forEach((el) => {
+  tray.querySelectorAll<HTMLElement>(".ccard").forEach((el) => {
     el.oncontextmenu = (e) => {
       e.preventDefault();
       if (cmd(core.sell_contract(+el.dataset.ci!))) toast("Contract sold");
       paintAll();
+    };
+    el.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      const from = +el.dataset.ci!;
+      const up = (ev: PointerEvent) => {
+        window.removeEventListener("pointerup", up);
+        const target = (ev.target as HTMLElement)?.closest?.(".ccard") as HTMLElement | null;
+        if (target && +target.dataset.ci! !== from) {
+          cmd(core.contract_swap(from, +target.dataset.ci!));
+          paintAll();
+        }
+      };
+      window.addEventListener("pointerup", up);
     };
   });
 }
@@ -1445,11 +1470,20 @@ function openShop() {
   const full = G.hand.length >= G.handMax;
   const termLine = (t: Term | null) =>
     t ? `<div class="ds" style="color:var(--extractor)">deliver ${t.need}× ${capName(t.item)} in ${t.rounds ?? t.roundsLeft}r → ◈${t.reward}</div>` : "";
+  const payLine = (label: string, v: number) =>
+    v > 0 ? `<div class="kv"><span>${label}</span><b style="color:var(--vault)">+◈${v}</b></div>` : "";
   modal(
     `<h3>Day ${G.round + 1} cleared</h3>
      <div class="big" style="color:var(--vault)">${G.roundDelivered.toLocaleString()}
-       <span style="font-size:15px;color:var(--ink-muted)">/ ${o.quota.toLocaleString()}${
-         G.carry ? ` · ⏳${G.carry} in the pipes` : ""}</span></div>
+       <span style="font-size:15px;color:var(--ink-muted)">/ ${o.quota.toLocaleString()}</span></div>
+     <div class="payslip">
+       ${payLine("Day wage", G.pay.base)}
+       ${payLine("Crew home early", G.pay.early)}
+       ${payLine("Interest on savings", G.pay.interest)}
+       ${payLine("Contracts settled", G.pay.termRewards)}
+       <div class="kv" style="border-top:1px solid var(--line);margin-top:4px;padding-top:4px">
+         <span><b>Paid out</b></span><b style="color:var(--extractor)">◈${G.pay.total}</b></div>
+     </div>
      <div class="stripe">
        <span class="chip gold">◈ <b>${G.credits}</b></span>
        <span class="chip"><i>NEXT</i> <b>${(G.nextQuota ?? 0).toLocaleString()}</b></span>

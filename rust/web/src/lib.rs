@@ -231,6 +231,12 @@ pub extern "C" fn sell_contract(idx: u32) -> usize {
     command(|g| g.sell_contract(idx as usize))
 }
 
+/// Swap two owned contracts in the tray.
+#[no_mangle]
+pub extern "C" fn contract_swap(a: u32, b: u32) -> usize {
+    command(|g| g.contract_swap(a as usize, b as usize))
+}
+
 /// Set a Filter's item-type gate: an ITEM_TYPES code, or -1 to clear.
 #[no_mangle]
 pub extern "C" fn set_type_gate(x: i32, y: i32, ty: i32) -> usize {
@@ -382,6 +388,7 @@ fn contract_key(c: ContractId) -> &'static str {
         ContractId::GearFutures => "gearfutures",
         ContractId::ResinCall => "resincall",
         ContractId::SupplyLine => "supplyline",
+        ContractId::Offshore => "offshore",
     }
 }
 
@@ -921,6 +928,13 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         overflow_core::run::SHIFTS_PER_ROUND,
         g.round_delivered,
         g.carry.len()
+    );
+
+    // The end-of-day pay slip.
+    let _ = write!(
+        s,
+        "\"pay\":{{\"base\":{},\"early\":{},\"interest\":{},\"termRewards\":{},\"total\":{}}},",
+        g.pay.base, g.pay.early, g.pay.interest, g.pay.term_rewards, g.pay.total
     );
 
     // Owned directives, aggregated with counts.

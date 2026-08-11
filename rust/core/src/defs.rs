@@ -423,6 +423,8 @@ pub enum ContractId {
     /// The deal every run starts with: head office deals two basic
     /// consignment cards every round. Sellable, if you're brave.
     SupplyLine,
+    /// Hoarding synergy: the interest cap doubles.
+    Offshore,
 }
 
 /// How a contract lives: forever, or as a term deal with a delivery
@@ -442,18 +444,20 @@ pub struct ContractDef {
 }
 
 /// Purchasable pool — SupplyLine is starting equipment, not on the shelf.
-pub const CONTRACT_POOL: [ContractId; 12] = [
+pub const CONTRACT_POOL: [ContractId; 13] = [
     ContractId::TarSands, ContractId::BulkManifests, ContractId::SweetTooth,
     ContractId::GentleHands, ContractId::GearSyndicate, ContractId::PuristClause,
     ContractId::FluxInjector, ContractId::NightShifts,
     ContractId::OreRetainer, ContractId::Prospector, ContractId::GearFutures,
-    ContractId::ResinCall,
+    ContractId::ResinCall, ContractId::Offshore,
 ];
 
 pub fn contract(id: ContractId) -> &'static ContractDef {
     use ContractId as C;
     use ContractKind::*;
     match id {
+        C::Offshore => &ContractDef { id: C::Offshore, name: "Offshore Accounts", cost: 18, kind: Ongoing,
+            blurb: "Your interest cap doubles. Money makes money — if you can resist spending it." },
         C::SupplyLine => &ContractDef { id: C::SupplyLine, name: "Supply Line", cost: 25, kind: Ongoing,
             blurb: "Head office deals two basic consignment cards every round. The deal that keeps the lights on — sell it and you'd better have another source." },
         C::OreRetainer => &ContractDef { id: C::OreRetainer, name: "Ore Retainer", cost: 20, kind: Ongoing,
@@ -461,11 +465,11 @@ pub fn contract(id: ContractId) -> &'static ContractDef {
         C::Prospector => &ContractDef { id: C::Prospector, name: "Prospector's Luck", cost: 15, kind: Ongoing,
             blurb: "Every round there's a coin-flip chance an extra crystal case is dealt." },
         C::GearFutures => &ContractDef { id: C::GearFutures, name: "Gear Futures", cost: 10,
-            kind: Term { rounds: 3, deliver: ItemType::Gear, count: 15, reward: 250 },
-            blurb: "Deliver 15 gears within 3 rounds → 250 credits. Miss the window and it lapses, worthless." },
+            kind: Term { rounds: 3, deliver: ItemType::Gear, count: 15, reward: 120 },
+            blurb: "Deliver 15 gears within 3 days → 120 credits. Miss the window and it lapses, worthless." },
         C::ResinCall => &ContractDef { id: C::ResinCall, name: "Resin Call", cost: 8,
-            kind: Term { rounds: 3, deliver: ItemType::Resin, count: 25, reward: 180 },
-            blurb: "Deliver 25 resin within 3 rounds → 180 credits. Sap wilts; move fast." },
+            kind: Term { rounds: 3, deliver: ItemType::Resin, count: 25, reward: 90 },
+            blurb: "Deliver 25 resin within 3 days → 90 credits. Sap wilts; move fast." },
         C::TarSands => &ContractDef { id: C::TarSands, name: "Tar Sands Deal", cost: 14, kind: Ongoing,
             blurb: "Every ore lot you buy carries +60% more ore — and +20% slag mixed in. Volume has a smell." },
         C::BulkManifests => &ContractDef { id: C::BulkManifests, name: "Bulk Manifests", kind: Ongoing, cost: 18,

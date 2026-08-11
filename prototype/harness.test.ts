@@ -18,7 +18,8 @@ type Exports = {
   state(): number;
   belt(x: number, y: number, d: number): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
-  buy_lot(i: number, bay: number): number;
+  buy_lot(i: number): number;
+  allocate(i: number, bay: number): number;
   supply_done(): number;
   shift_start(): number;
   shift_step(): number;
@@ -48,11 +49,20 @@ test("the shipped wasm plays a consignment round over the ABI", async () => {
   expect(s.credits).toBe(75);
   expect(s.quota).toBe(130);
   expect(s.bays.length).toBe(2);
-  expect(s.bays[0].total + s.bays[1].total).toBe(120); // the starter consignment
-  expect(s.bays[0].slots[0].name).toBe("Starter Ore");
+  // the Supply Line dealt two pure-ore cards for round 1
+  expect(s.supplyHand.length).toBe(2);
+  expect(s.supplyHand[0].runs[0].t).toBe("ore");
+  expect(s.contracts.some((c: any) => c.c === "supplyline")).toBe(true);
   expect(s.lotOffers.length).toBe(3);
   expect(s.hand.length).toBe(4);
   expect(s.shiftsMax).toBe(3);
+  // allocate the dealt cards, one per bay, and take the floor
+  s = read(core.allocate(0, 0));
+  expect(s.err).toBeNull();
+  s = read(core.allocate(0, 1));
+  expect(s.err).toBeNull();
+  expect(s.bays[0].slots.length).toBe(1);
+  expect(s.bays[1].slots.length).toBe(1);
   s = read(core.supply_done());
   expect(s.phase).toBe("build");
 
@@ -91,6 +101,8 @@ test("the shipped wasm plays a consignment round over the ABI", async () => {
   expect(one.state.shiftsUsed).toBe(1);
   expect(one.state.roundDelivered).toBeGreaterThan(0);
   expect(one.state.carry).toBeGreaterThan(0); // warm factory
+  expect(one.state.bays[0].slots.length).toBe(0); // the cards are SPENT
+  expect(one.state.bays[0].hopper).toBeGreaterThan(0); // material persists
   expect(one.sawVaultHop).toBe(true);
 
   const two = runShift();
@@ -105,12 +117,15 @@ test("the shipped wasm plays a consignment round over the ABI", async () => {
   expect(s.round).toBe(1);
   expect(s.quota).toBe(175);
   expect(s.lotOffers.length).toBe(3);
+  expect(s.supplyHand.length).toBeGreaterThanOrEqual(2); // dealt again
 
-  // Buy a shipment into bay 0's slots, then take the floor.
+  // Buy a card, allocate it, take the floor.
   const credits = s.credits;
-  s = read(core.buy_lot(0, 0));
+  s = read(core.buy_lot(0));
   expect(s.err).toBeNull();
   expect(s.credits).toBeLessThan(credits);
+  s = read(core.allocate(s.supplyHand.length - 1, 0));
+  expect(s.err).toBeNull();
 
   s = read(core.supply_done());
   expect(s.phase).toBe("build");

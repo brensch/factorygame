@@ -75,7 +75,14 @@ fn filter_gate_refuses_non_filters() {
 
 #[test]
 fn stepped_shift_sim_matches_the_committed_shift_exactly() {
-    let mut g = fresh(42);
+    let mut g = Game::new(42);
+    // slot the dealt supply cards at bay A so the line has material
+    while !g.supply_hand.is_empty() {
+        if g.allocate(0, 0).is_err() {
+            break;
+        }
+    }
+    g.supply_done().unwrap();
     // furnace beside bay A, short line east then down the far column
     let furnace = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
     g.play_card(furnace, 1, 6, Some(Dir::E), None, None).unwrap(); // (1,6)+(2,6)

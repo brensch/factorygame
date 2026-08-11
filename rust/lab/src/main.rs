@@ -139,9 +139,9 @@ impl DockBot {
     /// Shop: fuel first (clean ore lots split across the bays), then more
     /// furnaces, then whatever compounds. Dirty lots are poison without
     /// filters; the bot knows its limits.
-    /// The supply window: buy clean ore into free slots, alternating bays.
+    /// The supply window: buy clean ore cards while flush, then allocate the
+    /// whole supply hand across the bays, alternating.
     fn supply(&self, g: &mut Game) {
-        let mut bay = 0;
         let mut rerolls = 0;
         loop {
             let pick = g.lot_offers.iter().position(|l| {
@@ -151,13 +151,9 @@ impl DockBot {
             });
             match pick {
                 Some(i) => {
-                    if g.buy_lot(i, bay).is_err() {
-                        bay = (bay + 1) % g.bay_slots.len();
-                        if g.buy_lot(i, bay).is_err() {
-                            break; // both bays full or broke
-                        }
+                    if g.buy_lot(i).is_err() {
+                        break;
                     }
-                    bay = (bay + 1) % g.bay_slots.len();
                 }
                 None => {
                     if rerolls < 2 && g.credits > g.reroll_price() * 6 && g.shop_reroll().is_ok() {
@@ -167,6 +163,26 @@ impl DockBot {
                     break;
                 }
             }
+        }
+        // allocate only PURE ORE cards (a furnace line jams on anything
+        // else), alternating bays; discard the rest — the bot knows its
+        // limits.
+        let mut bay = 0;
+        let i = 0;
+        while i < g.supply_hand.len() {
+            let pure_ore =
+                g.supply_hand[i].runs.iter().all(|r| r.0 == overflow_core::defs::ItemType::Ore);
+            if !pure_ore {
+                g.supply_hand.remove(i);
+                continue;
+            }
+            if g.allocate(i, bay).is_err() {
+                bay = (bay + 1) % g.bay_slots.len();
+                if g.allocate(i, bay).is_err() {
+                    break; // both bays full
+                }
+            }
+            bay = (bay + 1) % g.bay_slots.len();
         }
         g.supply_done().unwrap();
     }

@@ -420,6 +420,9 @@ pub enum ContractId {
     TarSands, BulkManifests, SweetTooth, GentleHands,
     GearSyndicate, PuristClause, FluxInjector, NightShifts,
     OreRetainer, Prospector, GearFutures, ResinCall,
+    /// The deal every run starts with: head office deals two basic
+    /// consignment cards every round. Sellable, if you're brave.
+    SupplyLine,
 }
 
 /// How a contract lives: forever, or as a term deal with a delivery
@@ -438,6 +441,7 @@ pub struct ContractDef {
     pub blurb: &'static str,
 }
 
+/// Purchasable pool — SupplyLine is starting equipment, not on the shelf.
 pub const CONTRACT_POOL: [ContractId; 12] = [
     ContractId::TarSands, ContractId::BulkManifests, ContractId::SweetTooth,
     ContractId::GentleHands, ContractId::GearSyndicate, ContractId::PuristClause,
@@ -450,10 +454,12 @@ pub fn contract(id: ContractId) -> &'static ContractDef {
     use ContractId as C;
     use ContractKind::*;
     match id {
+        C::SupplyLine => &ContractDef { id: C::SupplyLine, name: "Supply Line", cost: 25, kind: Ongoing,
+            blurb: "Head office deals two basic consignment cards every round. The deal that keeps the lights on — sell it and you'd better have another source." },
         C::OreRetainer => &ContractDef { id: C::OreRetainer, name: "Ore Retainer", cost: 20, kind: Ongoing,
-            blurb: "A standing order: a free 30-ore consignment arrives every round, if a bay slot is open." },
+            blurb: "A standing order: an extra 30-ore consignment card is dealt every round." },
         C::Prospector => &ContractDef { id: C::Prospector, name: "Prospector's Luck", cost: 15, kind: Ongoing,
-            blurb: "Every round there's a coin-flip chance a free crystal case turns up at the docks." },
+            blurb: "Every round there's a coin-flip chance an extra crystal case is dealt." },
         C::GearFutures => &ContractDef { id: C::GearFutures, name: "Gear Futures", cost: 10,
             kind: Term { rounds: 3, deliver: ItemType::Gear, count: 15, reward: 250 },
             blurb: "Deliver 15 gears within 3 rounds → 250 credits. Miss the window and it lapses, worthless." },

@@ -157,6 +157,24 @@ and outputs." Extractors are gone. The factory is a processor now.
 - Tuning flag: DockBot's round-3 collapse (ratio ~0.5) persists — the bot
   starves itself; quota shape needs a pass once a human confirms the feel.
 
+## v3.2 (2026-08-11) — supply cards: dealt, allocated, spent
+
+- **Inputs are single-use cards.** They live in the same fan as blueprints
+  (brown crate cards) and are consumed when a shift runs — the card dissolves
+  into the bay's stream in slot order; whatever didn't physically stream
+  persists as card-less hopper material.
+- **Contracts deal the cards.** Every run starts with the **Supply Line**
+  contract: two basic consignment cards dealt every round (round 1 is pure
+  ore — mixed lots into a naive furnace line DEADLOCK the bay, a discovered
+  trap that is now a round-2+ lesson instead of a round-1 ambush). Ore
+  Retainer/Prospector deal extras. Sell your Supply Line if you dare.
+- **Buying ≠ allocating.** The supply window is purchase-only, once per
+  round. Allocation happens on the floor: drag a supply card onto a bay,
+  its slot pips fill; click the bay for the rack (eject ⏏ / reorder ↑).
+- The lab distribution under dealt supply: deaths spread rounds 0–5 with the
+  mode at 3 — the healthiest curve yet, and the bot now has to discard
+  non-ore cards it can't route, same as a filterless player.
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

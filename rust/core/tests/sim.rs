@@ -265,6 +265,14 @@ fn queued(g: &Game) -> u32 {
 /// spine into the vault at (17,9). Leaves the supply window first.
 fn build_starter(g: &mut Game) {
     if g.phase == GamePhase::Supply {
+        // slot everything the Supply Line dealt, alternating bays
+        let mut bay = 0;
+        while !g.supply_hand.is_empty() {
+            if g.allocate(0, bay % 2).is_err() && g.allocate(0, (bay + 1) % 2).is_err() {
+                break;
+            }
+            bay += 1;
+        }
         g.supply_done().unwrap();
     }
     for (row, toward) in [(6, Dir::S), (12, Dir::N)] {
@@ -292,7 +300,8 @@ fn a_full_scripted_round_1_processes_the_starter_consignment() {
     assert_eq!(g.credits, 75);
     assert_eq!(g.hand.len(), 4); // three furnaces and a fab
     assert_eq!(g.bays().len(), 2);
-    assert_eq!(queued(&g), 120, "the starter ore consignment waits at the docks");
+    assert!(g.has_contract(overflow_core::defs::ContractId::SupplyLine));
+    assert!(g.supply_hand.len() >= 2, "the Supply Line dealt the starter cards");
     assert_eq!(g.lot_offers.len(), 3, "…and more is for sale");
 
     build_starter(&mut g);
@@ -317,13 +326,18 @@ fn a_full_scripted_round_1_processes_the_starter_consignment() {
     assert_eq!(g.round, 1);
     assert_eq!(g.phase, GamePhase::Supply, "the supply window opens the round");
     assert_eq!(g.lot_offers.len(), 3);
+    // the Supply Line dealt this round's cards into the supply hand
+    assert!(g.supply_hand.len() >= 2, "dealt: {:?}", g.supply_hand.len());
 
-    // buy a shipment into a bay slot: slots fill, credits shrink
+    // buy a shipment CARD: hand grows, credits shrink; then allocate it
     let price = g.lot_offers[0].price;
     let before = g.credits;
-    let slots_before = g.bay_slots[0].len();
-    g.buy_lot(0, 0).unwrap();
+    let hand_before = g.supply_hand.len();
+    g.buy_lot(0).unwrap();
     assert_eq!(g.credits, before - price);
+    assert_eq!(g.supply_hand.len(), hand_before + 1);
+    let slots_before = g.bay_slots[0].len();
+    g.allocate(0, 0).unwrap();
     assert_eq!(g.bay_slots[0].len(), slots_before + 1);
 
     g.supply_done().unwrap();
@@ -348,7 +362,7 @@ fn retry_rewinds_the_whole_round() {
     let mut g = Game::new(9);
     g.supply_done().unwrap();
     let credits0 = g.credits;
-    let queue0 = g.bay_slots.clone();
+    let hand0 = g.supply_hand.clone();
     g.buy_belt(5, 5, Dir::E).unwrap(); // spend something
     for _ in 0..SHIFTS_PER_ROUND {
         g.run_shift().unwrap();
@@ -357,7 +371,7 @@ fn retry_rewinds_the_whole_round() {
     g.retry_round().unwrap();
     assert_eq!(g.phase, GamePhase::Build);
     assert_eq!(g.credits, credits0, "spent credits come back");
-    assert_eq!(g.bay_slots, queue0, "slots rewound");
+    assert_eq!(g.supply_hand, hand0, "the dealt hand rewound");
     assert!(!g.board.iter().any(|p| p.x == 5 && p.y == 5), "the belt is gone");
 }
 
@@ -365,10 +379,13 @@ fn retry_rewinds_the_whole_round() {
 fn the_factory_stays_warm_between_shifts() {
     let mut g = Game::new(42);
     build_starter(&mut g);
+    let before = queued(&g);
     g.run_shift().unwrap();
     assert!(!g.carry.is_empty(), "material still in the pipes after shift 1");
-    assert!(queued(&g) < 120, "the bays streamed some of their slots");
-    assert!(queued(&g) > 0, "40 ticks cannot drain 120 items from two bays");
+    assert!(g.bay_slots.iter().all(|s| s.is_empty()), "cards are consumed by the shift");
+    let hopper: u32 = g.bay_hoppers.iter().flatten().map(|e| e.1).sum();
+    assert!(hopper > 0, "unstreamed material persists in the hopper");
+    assert!(hopper < before, "…but some of it streamed");
 }
 
 #[test]

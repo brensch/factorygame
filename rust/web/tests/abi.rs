@@ -52,9 +52,24 @@ fn field(json: &str, key: &str) -> String {
 /// The starter build over the wire: a furnace beside each bay, lanes east,
 /// shared spine into the vault at (17,9).
 fn build_starter() {
-    // leave the supply window first — a run opens there
+    // allocate whatever was dealt, then leave the supply window
     let s = call(state());
     if field(&s, "phase") == "supply" {
+        let mut bay = 0u32;
+        loop {
+            let s = call(state());
+            let hand_at = s.find("\"supplyHand\":[").unwrap();
+            if s[hand_at..].starts_with("\"supplyHand\":[]") {
+                break;
+            }
+            if field(&call(allocate(0, bay)), "err") != "null" {
+                bay = (bay + 1) % 2;
+                if field(&call(allocate(0, bay)), "err") != "null" {
+                    break;
+                }
+            }
+            bay = (bay + 1) % 2;
+        }
         call(supply_done());
     }
     for (row, spine_d) in [(6i32, S), (12i32, 0 /* north */)] {
@@ -103,13 +118,12 @@ fn a_whole_round_through_the_wire_format() {
     assert!(s.contains("\"m\":\"bay\""), "bays pre-placed: {s}");
     assert_eq!(hand(&s).len(), 4);
 
-    // The starter consignment waits at the docks, in slots.
-    let bays_at = s.find("\"bays\":[").unwrap();
-    let bays = &s[bays_at..bays_at + s[bays_at..].find("],\"lotOffers\"").unwrap()];
-    assert!(bays.contains("\"total\":70"), "{bays}");
-    assert!(bays.contains("\"total\":50"), "{bays}");
-    assert!(bays.contains("\"slotMax\":3"), "{bays}");
-    assert!(bays.contains("Starter Ore"), "{bays}");
+    // The Supply Line dealt this round's cards into the supply hand.
+    let sh_at = s.find("\"supplyHand\":[").unwrap();
+    let sh = &s[sh_at..sh_at + s[sh_at..].find("],\"lotOffers\"").unwrap()];
+    assert!(sh.matches("\"name\":").count() >= 2, "dealt cards: {sh}");
+    assert!(s.contains("\"slotMax\":3"), "{s}");
+    assert!(s.contains("supplyline"), "the starting contract: {s}");
     // and the placements carry their bodies: the vault is 1×1, but shaped
     // machines will list multiple cells once placed
     assert!(s.contains("\"cells\":[[17,9]]"), "{s}");
@@ -143,11 +157,13 @@ fn a_whole_round_through_the_wire_format() {
     assert_eq!(num(&s, "round"), 1);
     assert_eq!(num(&s, "quota"), 175);
 
-    // Buy a shipment into bay 1's slots, then take the floor.
+    // Buy a shipment CARD, allocate it to bay 1, then take the floor.
     let credits = num(&s, "credits");
-    let s = call(buy_lot(0, 1));
+    let s = call(buy_lot(0));
     assert_eq!(field(&s, "err"), "null", "{s}");
     assert!(num(&s, "credits") < credits);
+    let s = call(allocate(0, 1));
+    assert_eq!(field(&s, "err"), "null", "{s}");
     let s = call(supply_done());
     assert_eq!(field(&s, "phase"), "build");
 }
@@ -164,13 +180,13 @@ fn failing_all_shifts_offers_retry_and_retry_rewinds() {
     let s = call(retry());
     assert_eq!(field(&s, "phase"), "build");
     assert_eq!(num(&s, "shiftsUsed"), 0);
-    let bays_at = s.find("\"bays\":[").unwrap();
-    assert!(s[bays_at..].contains("\"total\":70"), "queues rewound: {s}");
 }
 
 #[test]
 fn consumed_items_still_animate_their_final_hop() {
     call(boot(42));
+    // material at bay A, or nothing will ever hop
+    while field(&call(allocate(0, 0)), "err") == "null" {}
     call(supply_done());
     // Furnace port kissing bay A: the ore's only journey is bay→port,
     // invisible in out slots — it must appear as a hop.

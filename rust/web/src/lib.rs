@@ -189,10 +189,28 @@ pub extern "C" fn chute(x: i32, y: i32) -> usize {
     command(|g| g.buy_chute(x, y))
 }
 
-/// Buy the shipment at `lot_idx` into a free slot of bay `bay_idx`.
+/// Buy the shipment at `lot_idx` as a supply card into the hand.
 #[no_mangle]
-pub extern "C" fn buy_lot(lot_idx: u32, bay_idx: u32) -> usize {
-    command(|g| g.buy_lot(lot_idx as usize, bay_idx as usize))
+pub extern "C" fn buy_lot(lot_idx: u32) -> usize {
+    command(|g| g.buy_lot(lot_idx as usize))
+}
+
+/// Allocate the supply card at `supply_idx` into bay `bay_idx`'s next slot.
+#[no_mangle]
+pub extern "C" fn allocate(supply_idx: u32, bay_idx: u32) -> usize {
+    command(|g| g.allocate(supply_idx as usize, bay_idx as usize))
+}
+
+/// Pull a slotted card back into the supply hand.
+#[no_mangle]
+pub extern "C" fn unslot(bay_idx: u32, slot_idx: u32) -> usize {
+    command(|g| g.unslot(bay_idx as usize, slot_idx as usize))
+}
+
+/// Move a slotted card up one place in its bay's streaming order.
+#[no_mangle]
+pub extern "C" fn slot_up(bay_idx: u32, slot_idx: u32) -> usize {
+    command(|g| g.slot_up(bay_idx as usize, slot_idx as usize))
 }
 
 /// Close the supply window; the round's floor work begins.
@@ -363,6 +381,7 @@ fn contract_key(c: ContractId) -> &'static str {
         ContractId::Prospector => "prospector",
         ContractId::GearFutures => "gearfutures",
         ContractId::ResinCall => "resincall",
+        ContractId::SupplyLine => "supplyline",
     }
 }
 
@@ -637,6 +656,19 @@ fn push_card(out: &mut String, c: Card) {
     );
 }
 
+fn push_slotlot(s: &mut String, lot: &overflow_core::run::SlotLot) {
+    s.push_str("{\"name\":\"");
+    push_escaped(s, &lot.name);
+    s.push_str("\",\"runs\":[");
+    for (k, &(ty, count, quality)) in lot.runs.iter().enumerate() {
+        if k > 0 {
+            s.push(',');
+        }
+        let _ = write!(s, "{{\"t\":\"{}\",\"n\":{count},\"q\":{quality}}}", item_key(ty));
+    }
+    s.push_str("]}");
+}
+
 fn push_placement(out: &mut String, p: &Placement) {
     let d = def(p.m);
     let _ = write!(out, "{{\"x\":{},\"y\":{},\"m\":\"{}\",\"kind\":\"{}\",", p.x, p.y, machine_key(p.m), kind_key(d.kind));
@@ -772,35 +804,38 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         }
     }
 
-    // The docks: their slots, each holding a named consignment.
+    // The docks: hopper contents (card-less warm material) plus the slot
+    // rack of allocated cards, streamed in order.
     s.push_str("],\"bays\":[");
     for (i, ((bx, by), slots)) in g.bays().into_iter().zip(&g.bay_slots).enumerate() {
         if i > 0 {
             s.push(',');
         }
-        let total: u32 = slots.iter().flat_map(|l| l.runs.iter()).map(|e| e.1).sum();
+        let hopper: u32 = g.bay_hoppers[i].iter().map(|e| e.1).sum();
+        let slotted: u32 = slots.iter().flat_map(|l| l.runs.iter()).map(|e| e.1).sum();
         let _ = write!(
             s,
-            "{{\"x\":{bx},\"y\":{by},\"total\":{total},\"slotMax\":{},\"slots\":[",
+            "{{\"x\":{bx},\"y\":{by},\"hopper\":{hopper},\"total\":{},\"slotMax\":{},\"slots\":[",
+            hopper + slotted,
             overflow_core::run::BAY_SLOTS
         );
         for (j, lot) in slots.iter().enumerate() {
             if j > 0 {
                 s.push(',');
             }
-            s.push_str("{\"name\":\"");
-            push_escaped(&mut s, &lot.name);
-            s.push_str("\",\"runs\":[");
-            for (k, &(ty, count, quality)) in lot.runs.iter().enumerate() {
-                if k > 0 {
-                    s.push(',');
-                }
-                let _ =
-                    write!(s, "{{\"t\":\"{}\",\"n\":{count},\"q\":{quality}}}", item_key(ty));
-            }
-            s.push_str("]}");
+            push_slotlot(&mut s, lot);
         }
         s.push_str("]}");
+    }
+    s.push_str("],");
+
+    // Unallocated supply cards.
+    s.push_str("\"supplyHand\":[");
+    for (i, lot) in g.supply_hand.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        push_slotlot(&mut s, lot);
     }
     s.push_str("],");
 

@@ -21,7 +21,7 @@ interface Term { item: string; need: number; progress?: number; rounds?: number;
 interface OwnedContract { c: string; name: string; price: number; term: Term | null }
 interface ContractOffer { c: string; name: string; price: number; blurb: string; term: Term | null }
 interface SlotLot { name: string; runs: { t: string; n: number; q: number }[] }
-interface BayState { x: number; y: number; total: number; slotMax: number; slots: SlotLot[] }
+interface BayState { x: number; y: number; total: number; hopper: number; slotMax: number; slots: SlotLot[] }
 interface LotOffer { name: string; price: number; q: number; entries: { t: string; n: number }[] }
 interface Pl {
   x: number; y: number; m: string; kind: string;
@@ -37,7 +37,7 @@ interface State {
   audit: boolean; phase: "build" | "shop" | "supply" | "over"; won: boolean;
   qualityCap: number; boardW: number; boardH: number;
   board: Pl[]; hand: Card[]; offers: ShopOffer[];
-  bays: BayState[]; lotOffers: LotOffer[];
+  bays: BayState[]; lotOffers: LotOffer[]; supplyHand: SlotLot[];
   contracts: OwnedContract[]; contractOffers: ContractOffer[];
   shiftsUsed: number; shiftsMax: number; roundDelivered: number; carry: number;
   directives: OwnedDirective[];
@@ -92,7 +92,10 @@ const core = wasm.instance.exports as {
   merger(x: number, y: number, d: number): number;
   splitter(x: number, y: number, d: number): number;
   chute(x: number, y: number): number;
-  buy_lot(i: number, bay: number): number;
+  buy_lot(i: number): number;
+  allocate(i: number, bay: number): number;
+  unslot(bay: number, slot: number): number;
+  slot_up(bay: number, slot: number): number;
   supply_done(): number;
   buy_contract(i: number): number;
   sell_contract(i: number): number;
@@ -333,19 +336,28 @@ function draw() {
     const ins = c.cells.flatMap(([bx, by]) => inFlows.get(`${bx},${by}`) ?? []);
 
     if (c.m === "bay") {
+      const bay = G.bays.find((b) => b.x === c.x && b.y === c.y);
       ctx.fillStyle = "#2b3542";
-      ctx.strokeStyle = "#8ea1b8";
+      ctx.strokeStyle = ui.selected && at(ui.selected.x, ui.selected.y) === c ? "#fff" : "#8ea1b8";
       ctx.lineWidth = 1.5;
       rr(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4, 6);
       ctx.fill(); ctx.stroke();
       ctx.fillStyle = "#e8eef6";
-      ctx.font = `700 ${Math.max(8, TILE * 0.2)}px ui-monospace,monospace`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText("BAY", cx, cy - TILE * 0.14);
-      const bay = G.bays.find((b) => b.x === c.x && b.y === c.y);
-      ctx.fillStyle = "#f0a63a";
       ctx.font = `700 ${Math.max(7, TILE * 0.17)}px ui-monospace,monospace`;
-      ctx.fillText(String(bay?.total ?? 0), cx, cy + TILE * 0.18);
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("BAY", cx, cy - TILE * 0.2);
+      ctx.fillStyle = "#f0a63a";
+      ctx.fillText(String(bay?.total ?? 0), cx, cy + TILE * 0.02);
+      // the slot rack: one pip per slot, filled when a card sits in it
+      if (bay) {
+        const pipw = (TILE - 12) / bay.slotMax;
+        for (let k = 0; k < bay.slotMax; k++) {
+          ctx.fillStyle = k < bay.slots.length ? "#e8c86a" : "#12161d";
+          ctx.strokeStyle = "#0b0e13";
+          ctx.fillRect(c.x * TILE + 6 + k * pipw + 1, c.y * TILE + TILE - 13, pipw - 2, 6);
+          ctx.strokeRect(c.x * TILE + 6 + k * pipw + 1, c.y * TILE + TILE - 13, pipw - 2, 6);
+        }
+      }
       for (const f of outs) portOut(c.x, c.y, f.d, f.status, f.secondary);
     } else if (c.m === "chute") {
       ctx.fillStyle = "#12151b";
@@ -669,8 +681,65 @@ function paintHand() {
     fan.appendChild(el);
   });
 
+  // supply cards: single-use consignments — drag one onto a bay to slot it
+  G.supplyHand.forEach((lot, i) => {
+    const el = document.createElement("div");
+    el.className = "pi cardf supply";
+    const off = G.hand.length + i - (n + G.supplyHand.length - 1) / 2;
+    el.style.setProperty("--fan", `rotate(${off * 3.2}deg) translateY(${Math.abs(off) * 7}px)`);
+    const chips = lot.runs
+      .map((r) => `<span class="ichip"><i style="background:${ITEM_COLOR[r.t] ?? "#fff"}"></i>${r.n}</span>`)
+      .join(" ");
+    el.innerHTML =
+      `<div class="sw" style="background:#8a6d4a">📦</div>` +
+      `<div class="nm">${lot.name}</div><div class="ct">${chips}</div>`;
+    el.title = "drag onto a loading bay to slot it";
+    el.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      supplyPress(e, i, el);
+    };
+    fan.appendChild(el);
+  });
+
   (document.getElementById("deckInfo") as HTMLElement).textContent =
     `${G.hand.length}/${G.handMax}`;
+}
+
+/** Drag a supply card onto a bay to allocate it into the next free slot. */
+function supplyPress(e: PointerEvent, idx: number, el: HTMLElement) {
+  if (G.phase !== "build" || ui.animating) return;
+  const sx = e.clientX, sy = e.clientY;
+  let ghost: HTMLElement | null = null;
+  const move = (ev: PointerEvent) => {
+    if (!ghost && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 8) {
+      ghost = el.cloneNode(true) as HTMLElement;
+      ghost.id = "dragCard";
+      ghost.style.setProperty("--fan", "rotate(0deg)");
+      document.body.appendChild(ghost);
+    }
+    if (ghost) {
+      ghost.style.left = ev.clientX - 46 + "px";
+      ghost.style.top = ev.clientY - 61 + "px";
+      hover = tileFromClient(ev.clientX, ev.clientY);
+      draw();
+    }
+  };
+  const up = (ev: PointerEvent) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (!ghost) return;
+    ghost.remove();
+    const t = tileFromClient(ev.clientX, ev.clientY);
+    const bayIdx = t ? G.bays.findIndex((b) => b.x === t.x && b.y === t.y) : -1;
+    if (bayIdx >= 0) {
+      if (cmd(core.allocate(idx, bayIdx))) toast(`Slotted at Bay ${String.fromCharCode(65 + bayIdx)}`);
+    }
+    hover = null;
+    paintAll();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
 }
 
 /** Card interaction: a clean click arms the card as the tool; dragging it
@@ -837,6 +906,30 @@ function paintInfo() {
 function paintInspector() {
   const body = document.getElementById("inspBody")!;
   const c = ui.selected ? at(ui.selected.x, ui.selected.y) : null;
+  if (c && c.m === "bay") {
+    const bi = G.bays.findIndex((b) => b.x === c.x && b.y === c.y);
+    const bay = G.bays[bi];
+    body.innerHTML =
+      `<div class="kv"><span>Hopper</span><b>⏳${bay.hopper}</b></div>` +
+      bay.slots.map((lot, k) => {
+        const chips = lot.runs
+          .map((r) => `<span class="ichip"><i style="background:${ITEM_COLOR[r.t] ?? "#fff"}"></i>${r.n}</span>`)
+          .join(" ");
+        return `<div class="kv" style="margin-top:5px"><span>${k + 1}. <b>${lot.name}</b> ${chips}</span>
+          <span>
+            <button data-up="${k}" style="width:26px"${k === 0 ? " disabled" : ""}>↑</button>
+            <button data-eject="${k}" style="width:26px">⏏</button>
+          </span></div>`;
+      }).join("") +
+      (bay.slots.length === 0 ? `<div class="kv" style="margin-top:5px;color:var(--ink-muted)">drag supply cards here</div>` : "");
+    body.querySelectorAll<HTMLElement>("[data-up]").forEach((el) => {
+      el.onclick = () => { cmd(core.slot_up(bi, +el.dataset.up!)); paintAll(); };
+    });
+    body.querySelectorAll<HTMLElement>("[data-eject]").forEach((el) => {
+      el.onclick = () => { cmd(core.unslot(bi, +el.dataset.eject!)); paintAll(); };
+    });
+    return;
+  }
   if (!c || (c.m !== "filter" && c.m !== "splitter")) { body.innerHTML = ""; return; }
   if (c.m === "filter") {
     const typeGate = c.tg;
@@ -1061,6 +1154,13 @@ cv.addEventListener("pointerdown", (e) => {
   const existing = at(t.x, t.y);
   if (existing) {
     if (existing.m === "vault") return;
+    if (existing.m === "bay") {
+      // bays don't move or rotate, but they open their slot rack
+      ui.selected = { x: t.x, y: t.y };
+      ui.multiSel.clear();
+      paintAll();
+      return;
+    }
     drag = { mode: "maybe-move", start: t }; // click or move — decided on release
     return;
   }
@@ -1271,17 +1371,6 @@ function closeModal() { document.getElementById("modal")!.classList.remove("on")
 /** The start-of-round supply window: consignments for sale, slotted into
  *  the bays. Buying picks the bay; each bay holds a limited slot rack. */
 function openSupply() {
-  const bayBox = (b: BayState, i: number) => {
-    const slots = Array.from({ length: b.slotMax }, (_, k) => {
-      const lot = b.slots[k];
-      if (!lot) return `<div class="slot empty">empty</div>`;
-      const runs = lot.runs
-        .map((r) => `<span class="ichip"><i style="background:${ITEM_COLOR[r.t] ?? "#fff"}"></i>${r.n}</span>`)
-        .join(" ");
-      return `<div class="slot"><b>${lot.name}</b>${runs}</div>`;
-    }).join("");
-    return `<div class="baybox"><div class="bayhdr">BAY ${String.fromCharCode(65 + i)}</div>${slots}</div>`;
-  };
   modal(
     `<h3>Supply — round ${G.round + 1}</h3>
      <div class="stripe">
@@ -1292,7 +1381,9 @@ function openSupply() {
          <b>${capName(G.market)}</b> ×${G.marketMult}</span>
        ${G.auditTag ? `<span class="chip warn">⚠ ${G.auditTag.toUpperCase()} −40%</span>` : ""}
      </div>
-     <div class="baywrap">${G.bays.map(bayBox).join("")}</div>
+     <p style="font-size:13px">Your contracts dealt
+       <b>${G.supplyHand.length} supply card${G.supplyHand.length === 1 ? "" : "s"}</b> to your hand.
+       One chance to buy extra — then slot everything at the bays on the floor.</p>
      <div class="offers" style="grid-template-columns:repeat(auto-fit,minmax(175px,1fr))">${G.lotOffers.map((l, i) => {
        const afford = G.credits >= l.price;
        const contents = l.entries
@@ -1302,10 +1393,9 @@ function openSupply() {
          <div class="nm">📦 ${l.name}${l.q ? ` <span style="color:var(--ink-muted)">q${l.q}</span>` : ""}</div>
          <div class="ds">${contents}</div>
          <div class="pr">◈ ${l.price}</div>
-         <div class="row" style="margin-top:6px">${G.bays.map((b, bi) => {
-           const full = b.slots.length >= b.slotMax;
-           return `<button data-lot-buy="${i}" data-bay="${bi}"${afford && !full ? "" : " disabled"}>→ ${String.fromCharCode(65 + bi)}</button>`;
-         }).join("")}</div></div>`;
+         <div class="row" style="margin-top:6px">
+           <button data-lot-buy="${i}"${afford ? "" : " disabled"}>Buy</button>
+         </div></div>`;
      }).join("")}</div>
      <div class="row">
        <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>↻ Reroll ◈${G.rerollPrice}</button>
@@ -1315,7 +1405,7 @@ function openSupply() {
   document.querySelectorAll<HTMLElement>("[data-lot-buy]").forEach((el) => {
     el.onclick = (e) => {
       e.stopPropagation();
-      if (cmd(core.buy_lot(+el.dataset.lotBuy!, +el.dataset.bay!))) paintAll();
+      if (cmd(core.buy_lot(+el.dataset.lotBuy!))) paintAll();
       openSupply();
     };
   });

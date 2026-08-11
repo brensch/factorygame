@@ -126,6 +126,38 @@ pub fn roll_lot(round: usize, contracts: &[ContractId], rng: &mut Rng) -> Lot {
     lot
 }
 
+/// The basic deal table: what a Supply Line sends. Ore-heavy, no exotics.
+pub fn roll_basic_lot(round: usize, contracts: &[ContractId], rng: &mut Rng) -> Lot {
+    let scale = 1.0 + round as f64 * 0.5;
+    let q = |n: u32| (n as f64 * scale).round() as u32;
+    let mut lot = match rng.below(3) {
+        0 => Lot { name: "Bulk Ore", entries: vec![(ItemType::Ore, q(55))], quality: 0, price: 0 },
+        1 => Lot {
+            name: "Mixed Manifest",
+            entries: vec![(ItemType::Ore, q(35)), (ItemType::Sap, q(18))],
+            quality: 1,
+            price: 0,
+        },
+        _ => Lot { name: "Fresh Sap", entries: vec![(ItemType::Sap, q(35))], quality: 2, price: 0 },
+    };
+    if contracts.contains(&ContractId::TarSands) {
+        for e in lot.entries.iter_mut() {
+            if e.0 == ItemType::Ore {
+                let extra = (e.1 as f64 * 0.6) as u32;
+                e.1 += extra;
+                lot.entries.push((ItemType::Slag, (extra as f64 * 0.33) as u32));
+                break;
+            }
+        }
+    }
+    if contracts.contains(&ContractId::BulkManifests) {
+        for e in lot.entries.iter_mut() {
+            e.1 = (e.1 as f64 * 1.3).round() as u32;
+        }
+    }
+    lot
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GamePhase {
     /// Placing machines and belts; hand is live.
@@ -192,8 +224,14 @@ pub struct Game {
     pub contract_offers: Vec<ContractId>,
     /// Shipments on offer while the supply window is open.
     pub lot_offers: Vec<Lot>,
-    /// Each bay's slots: up to [`BAY_SLOTS`] consignments, streamed in order.
+    /// Unallocated supply cards: bought or dealt, waiting to be slotted.
+    pub supply_hand: Vec<SlotLot>,
+    /// Each bay's slots: up to [`BAY_SLOTS`] allocated cards, streamed in
+    /// order and CONSUMED by running a shift.
     pub bay_slots: Vec<Vec<SlotLot>>,
+    /// Items that physically streamed into a bay but weren't processed —
+    /// they persist (warm), but their card is already spent.
+    pub bay_hoppers: Vec<Vec<(ItemType, u32, i32)>>,
     /// Items still on the board between shifts — the warm factory.
     pub carry: Vec<SeedItem>,
     /// Shifts spent on the current round, of [`SHIFTS_PER_ROUND`].
@@ -222,7 +260,9 @@ struct Snapshot {
     credits: u32,
     board: Vec<Placement>,
     hand: Vec<Card>,
+    supply_hand: Vec<SlotLot>,
     bay_slots: Vec<Vec<SlotLot>>,
+    bay_hoppers: Vec<Vec<(ItemType, u32, i32)>>,
     carry: Vec<SeedItem>,
     contracts: Vec<ContractInst>,
 }
@@ -236,11 +276,7 @@ impl Game {
             Placement::new(0, BOARD_H / 2 - 3, MachineId::Bay, Some(Dir::E)),
             Placement::new(0, BOARD_H / 2 + 3, MachineId::Bay, Some(Dir::E)),
         ];
-        // Head office sends a starter consignment, split across the docks.
-        let bay_slots = vec![
-            vec![SlotLot { name: "Starter Ore".into(), runs: vec![(ItemType::Ore, 70, 0)] }],
-            vec![SlotLot { name: "Starter Ore".into(), runs: vec![(ItemType::Ore, 50, 0)] }],
-        ];
+        let bay_slots = vec![Vec::new(), Vec::new()];
         let mut g = Game {
             round: 0,
             credits: STARTING_CREDITS,
@@ -249,10 +285,12 @@ impl Game {
             hand: starting_hand(),
             offers: Vec::new(),
             directives: Vec::new(),
-            contracts: Vec::new(),
+            contracts: vec![ContractInst::new(ContractId::SupplyLine)],
             contract_offers: Vec::new(),
             lot_offers: Vec::new(),
+            supply_hand: Vec::new(),
             bay_slots,
+            bay_hoppers: vec![Vec::new(), Vec::new()],
             carry: Vec::new(),
             shifts_used: 0,
             round_delivered: 0,
@@ -266,8 +304,89 @@ impl Game {
             seed,
         };
         g.roll_conditions(0);
+        g.deal_supply();
         g.lot_offers = (0..3).map(|_| roll_lot(0, &[], &mut g.rng)).collect();
         g
+    }
+
+    /// The contract-driven deal: every round, owned contracts put supply
+    /// cards straight into your hand. This is the primary input faucet.
+    fn deal_supply(&mut self) {
+        let ids = self.contract_ids();
+        if self.has_contract(ContractId::SupplyLine) {
+            for _ in 0..2 {
+                // round 1 teaches: pure ore, no routing traps. Mixed lots
+                // (sap in an ore line jams a naive build) start at round 2.
+                let lot = if self.round == 0 {
+                    Lot { name: "Bulk Ore", entries: vec![(ItemType::Ore, 55)], quality: 0, price: 0 }
+                } else {
+                    roll_basic_lot(self.round, &ids, &mut self.rng)
+                };
+                self.supply_hand.push(SlotLot {
+                    name: lot.name.into(),
+                    runs: lot.entries.iter().map(|&(t, n)| (t, n, lot.quality)).collect(),
+                });
+            }
+        }
+        if self.has_contract(ContractId::OreRetainer) {
+            self.supply_hand.push(SlotLot {
+                name: "Retainer Ore".into(),
+                runs: vec![(ItemType::Ore, 30, 0)],
+            });
+        }
+        if self.has_contract(ContractId::Prospector) && self.rng.next_f64() < 0.5 {
+            self.supply_hand.push(SlotLot {
+                name: "Prospector Crystal".into(),
+                runs: vec![(ItemType::Crystal, 10, 2)],
+            });
+        }
+    }
+
+    /// Allocate a supply card from the hand into a bay's next free slot.
+    pub fn allocate(&mut self, supply_idx: usize, bay_idx: usize) -> Result<(), String> {
+        if !matches!(self.phase, GamePhase::Build | GamePhase::Supply) {
+            return Err("cannot allocate now".into());
+        }
+        if supply_idx >= self.supply_hand.len() {
+            return Err("no such supply card".into());
+        }
+        if bay_idx >= self.bay_slots.len() {
+            return Err("no such bay".into());
+        }
+        if self.bay_slots[bay_idx].len() >= BAY_SLOTS {
+            return Err("that bay's slots are full".into());
+        }
+        let lot = self.supply_hand.remove(supply_idx);
+        self.bay_slots[bay_idx].push(lot);
+        Ok(())
+    }
+
+    /// Pull a slotted card back into the supply hand.
+    pub fn unslot(&mut self, bay_idx: usize, slot_idx: usize) -> Result<(), String> {
+        if !matches!(self.phase, GamePhase::Build | GamePhase::Supply) {
+            return Err("cannot rearrange now".into());
+        }
+        let slots =
+            self.bay_slots.get_mut(bay_idx).ok_or("no such bay")?;
+        if slot_idx >= slots.len() {
+            return Err("no such slot".into());
+        }
+        let lot = slots.remove(slot_idx);
+        self.supply_hand.push(lot);
+        Ok(())
+    }
+
+    /// Move a slotted card up one place in its bay's streaming order.
+    pub fn slot_up(&mut self, bay_idx: usize, slot_idx: usize) -> Result<(), String> {
+        if !matches!(self.phase, GamePhase::Build | GamePhase::Supply) {
+            return Err("cannot rearrange now".into());
+        }
+        let slots = self.bay_slots.get_mut(bay_idx).ok_or("no such bay")?;
+        if slot_idx == 0 || slot_idx >= slots.len() {
+            return Err("cannot move that".into());
+        }
+        slots.swap(slot_idx, slot_idx - 1);
+        Ok(())
     }
 
     /// Does the run hold a contract of this kind (any instance)?
@@ -289,7 +408,9 @@ impl Game {
             credits: self.credits,
             board: self.board.clone(),
             hand: self.hand.clone(),
+            supply_hand: self.supply_hand.clone(),
             bay_slots: self.bay_slots.clone(),
+            bay_hoppers: self.bay_hoppers.clone(),
             carry: self.carry.clone(),
             contracts: self.contracts.clone(),
         });
@@ -585,10 +706,16 @@ impl Game {
         let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
         // the warm factory: whatever was in the pipes is still in the pipes
         sim.seed_items(&self.carry);
-        // bay slots stream from the docks, slot by slot, run by run
-        for ((x, y), slots) in self.bays().into_iter().zip(&self.bay_slots) {
+        // each bay streams its hopper (already-delivered material) first,
+        // then this round's slotted cards, in slot order
+        for (b, (x, y)) in self.bays().into_iter().enumerate() {
             let mut seeds = Vec::new();
-            for lot in slots {
+            for &(ty, count, quality) in &self.bay_hoppers[b] {
+                for _ in 0..count {
+                    seeds.push(SeedItem { x, y, buffered: true, ty, quality });
+                }
+            }
+            for lot in &self.bay_slots[b] {
                 for &(ty, count, quality) in &lot.runs {
                     for _ in 0..count {
                         seeds.push(SeedItem { x, y, buffered: true, ty, quality });
@@ -641,27 +768,25 @@ impl Game {
         let mut sim = self.shift_sim()?;
         let result = sim.run(self.shift_ticks());
 
-        // Capture the warm state: bay leftovers re-form as a single
-        // "Remnants" consignment per bay, everything else carries loose.
+        // The cards are spent: slotted consignments dissolved into the
+        // stream when the shift ran. Whatever physically remains in a bay
+        // becomes hopper material (warm, but card-less).
         let bays = self.bays();
         let mut carry = Vec::new();
-        let mut remnants: Vec<Vec<(ItemType, u32, i32)>> = vec![Vec::new(); bays.len()];
+        let mut hoppers: Vec<Vec<(ItemType, u32, i32)>> = vec![Vec::new(); bays.len()];
         for seed in sim.export_state() {
             match bays.iter().position(|&(bx, by)| (bx, by) == (seed.x, seed.y)) {
-                Some(b) if seed.buffered => match remnants[b].last_mut() {
+                Some(b) if seed.buffered => match hoppers[b].last_mut() {
                     Some(e) if e.0 == seed.ty && e.2 == seed.quality => e.1 += 1,
-                    _ => remnants[b].push((seed.ty, 1, seed.quality)),
+                    _ => hoppers[b].push((seed.ty, 1, seed.quality)),
                 },
                 _ => carry.push(seed),
             }
         }
         self.carry = carry;
-        for (b, runs) in remnants.into_iter().enumerate() {
-            self.bay_slots[b] = if runs.is_empty() {
-                Vec::new()
-            } else {
-                vec![SlotLot { name: "Remnants".into(), runs }]
-            };
+        self.bay_hoppers = hoppers;
+        for slots in self.bay_slots.iter_mut() {
+            slots.clear();
         }
 
         // Term contracts count this shift's deliveries toward their targets.
@@ -711,7 +836,9 @@ impl Game {
         self.credits = snap.credits;
         self.board = snap.board;
         self.hand = snap.hand;
+        self.supply_hand = snap.supply_hand;
         self.bay_slots = snap.bay_slots;
+        self.bay_hoppers = snap.bay_hoppers;
         self.carry = snap.carry;
         self.contracts = snap.contracts;
         self.shifts_used = 0;
@@ -720,25 +847,19 @@ impl Game {
         Ok(())
     }
 
-    /// Buy the shipment at `lot_idx` into a free slot of bay `bay_idx`. The
-    /// slot choice IS the input decision: what arrives where, in what order.
-    pub fn buy_lot(&mut self, lot_idx: usize, bay_idx: usize) -> Result<(), String> {
+    /// Buy the shipment at `lot_idx` as a supply CARD into the hand — the
+    /// one-per-round purchase window. Allocation happens on the floor.
+    pub fn buy_lot(&mut self, lot_idx: usize) -> Result<(), String> {
         if self.phase != GamePhase::Supply {
             return Err("the supply window is closed".into());
         }
         let lot = self.lot_offers.get(lot_idx).ok_or("no such shipment")?.clone();
-        if bay_idx >= self.bay_slots.len() {
-            return Err("no such bay".into());
-        }
-        if self.bay_slots[bay_idx].len() >= BAY_SLOTS {
-            return Err("that bay's slots are full".into());
-        }
         if self.credits < lot.price {
             return Err("cannot afford that shipment".into());
         }
         self.credits -= lot.price;
         self.lot_offers.remove(lot_idx);
-        self.bay_slots[bay_idx].push(SlotLot {
+        self.supply_hand.push(SlotLot {
             name: lot.name.into(),
             runs: lot.entries.iter().map(|&(ty, n)| (ty, n, lot.quality)).collect(),
         });
@@ -862,27 +983,12 @@ impl Game {
         Ok(())
     }
 
-    /// Open the supply window: roll consignment offers, apply the contracts
-    /// that grant free inputs.
+    /// Open the supply window: the contracts deal this round's cards, and
+    /// the one-time purchase rack is rolled.
     fn enter_supply(&mut self) {
+        self.deal_supply();
         let ids = self.contract_ids();
         self.lot_offers = (0..3).map(|_| roll_lot(self.round, &ids, &mut self.rng)).collect();
-        if self.has_contract(ContractId::OreRetainer) {
-            if let Some(slots) = self.bay_slots.iter_mut().find(|s| s.len() < BAY_SLOTS) {
-                slots.push(SlotLot {
-                    name: "Retainer Ore".into(),
-                    runs: vec![(ItemType::Ore, 30, 0)],
-                });
-            }
-        }
-        if self.has_contract(ContractId::Prospector) && self.rng.next_f64() < 0.5 {
-            if let Some(slots) = self.bay_slots.iter_mut().find(|s| s.len() < BAY_SLOTS) {
-                slots.push(SlotLot {
-                    name: "Prospector Crystal".into(),
-                    runs: vec![(ItemType::Crystal, 10, 2)],
-                });
-            }
-        }
         self.phase = GamePhase::Supply;
     }
 

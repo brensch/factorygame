@@ -6,12 +6,12 @@
 //! applies them.
 
 use crate::cards::{default_unlocked, shop_rack, starting_hand, Card, Offer};
-use crate::defs::{def, Dir, DirectiveId, MachineId, QUALITY_CAP};
+use crate::defs::{def, Dir, DirectiveId, ItemType, MachineId, Tag, ITEM_TYPES, QUALITY_CAP, TAGS};
 use crate::rng::Rng;
 use crate::sim::{FilterCfg, Placement, ShiftResult, Sim};
 
-pub const BOARD_W: i32 = 10;
-pub const BOARD_H: i32 = 7;
+pub const BOARD_W: i32 = 14;
+pub const BOARD_H: i32 = 14;
 pub const QUOTAS: [i64; 12] = [20, 45, 90, 200, 400, 700, 1200, 2400, 4500, 8000, 14000, 30000];
 /// Blueprints the hand can hold. Buying past this is refused, and so is
 /// pulling a machine off the board when there's no room for its card.
@@ -19,16 +19,20 @@ pub const HAND_MAX: usize = 10;
 /// Offers on one shop rack (the last slot is always a directive).
 pub const SHOP_SIZE: usize = 5;
 /// Base reroll price, before the round multiplier and escalation.
-pub const REROLL_BASE: u32 = 5;
+pub const REROLL_BASE: u32 = 2;
 pub const STARTING_CREDITS: u32 = 15;
+/// The spot market pays this multiple for the in-demand item.
+pub const MARKET_MULT: f64 = 2.0;
+/// Audit inspections slow the inspected tag to this fraction.
+pub const AUDIT_SPEED_PENALTY: f64 = 0.6;
 
 /// Shop inflation: prices track the quota curve so a purchase stays a real
-/// decision all run — roughly "a machine costs a fifth of the next quota"
-/// once the curve outruns the base prices. Without this, mid-run surplus
-/// trivially buys the whole rack every round.
+/// decision all run. The floor matters as much as the slope — early quotas
+/// are trivially overshot with the starting kit, so early prices sitting at
+/// ~1× base is what let a good first round buy the whole rack.
 pub fn shop_price_mult(round: usize) -> f64 {
     let next = (round + 1).min(QUOTAS.len() - 1);
-    (QUOTAS[next] as f64 / 40.0).max(1.0)
+    (QUOTAS[next] as f64 / 35.0).max(3.0)
 }
 
 /// A base price scaled for the shop of the given round.
@@ -78,6 +82,13 @@ pub struct Game {
     pub offers: Vec<Offer>,
     /// Directives owned this run — permanent, stacking, never placed.
     pub directives: Vec<DirectiveId>,
+    /// The spot market for the round being (or about to be) built: this item
+    /// pays [`MARKET_MULT`] × at the vault. Rolled when the shop opens, so
+    /// purchases can chase it.
+    pub market: ItemType,
+    /// Audit rounds only: the tag under inspection, working at
+    /// [`AUDIT_SPEED_PENALTY`] speed this round.
+    pub audit_tag: Option<Tag>,
     pub unlocked: Vec<MachineId>,
     pub history: Vec<RoundOutcome>,
     /// Rerolls taken in the current shop; escalates the price.
@@ -89,9 +100,9 @@ pub struct Game {
 impl Game {
     pub fn new(seed: u32) -> Game {
         let rng = Rng::new(seed);
-        // The Vault starts bolted to the east edge, as in the design doc.
-        let board = vec![Placement::new(BOARD_W - 1, 3, MachineId::Vault, None)];
-        Game {
+        // The Vault starts bolted to the east edge, mid-board.
+        let board = vec![Placement::new(BOARD_W - 1, BOARD_H / 2, MachineId::Vault, None)];
+        let mut g = Game {
             round: 0,
             credits: STARTING_CREDITS,
             phase: GamePhase::Build,
@@ -99,12 +110,28 @@ impl Game {
             hand: starting_hand(),
             offers: Vec::new(),
             directives: Vec::new(),
+            market: ItemType::Ore, // rolled properly just below
+            audit_tag: None,
             unlocked: default_unlocked(),
             history: Vec::new(),
             rerolls: 0,
             rng,
             seed,
-        }
+        };
+        g.roll_conditions(0);
+        g
+    }
+
+    /// Roll the round's chance elements: what the market wants, and (on audit
+    /// rounds) which tag the inspectors slow down. Stored, so a retry replays
+    /// the same conditions.
+    fn roll_conditions(&mut self, round: usize) {
+        self.market = ITEM_TYPES[self.rng.below(ITEM_TYPES.len())];
+        self.audit_tag = if is_audit(round) {
+            Some(TAGS[self.rng.below(TAGS.len())])
+        } else {
+            None
+        };
     }
 
     /// What the shop currently charges for an offer.
@@ -319,12 +346,16 @@ impl Game {
         Ok(())
     }
 
-    /// The shift as a steppable sim — same board, same seed, same directives
-    /// as `run_shift`, so a renderer can animate tick by tick and the
-    /// committed result is guaranteed identical.
+    /// The shift as a steppable sim — same board, seed, directives, market
+    /// and audit as `run_shift`, so a renderer can animate tick by tick and
+    /// the committed result is guaranteed identical.
     pub fn shift_sim(&self) -> Result<Sim, String> {
         let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
         sim.apply_directives(&self.directives);
+        sim.set_demand(self.market, MARKET_MULT);
+        if let Some(tag) = self.audit_tag {
+            sim.apply_tag_speed(tag, AUDIT_SPEED_PENALTY);
+        }
         Ok(sim)
     }
 
@@ -362,6 +393,9 @@ impl Game {
             } else {
                 self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
                 self.rerolls = 0;
+                // Next round's conditions are known in the shop, so purchases
+                // can chase the market and brace for the inspection.
+                self.roll_conditions(self.round + 1);
                 self.phase = GamePhase::Shop;
             }
         }

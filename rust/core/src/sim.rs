@@ -7,7 +7,7 @@
 //!   - Order-independent. Tile iteration order never affects the outcome.
 
 use crate::defs::{
-    def, directive, item_value, Dir, DirectiveId, ItemType, Kind, MachineDef, MachineId,
+    def, directive, item_value, Dir, DirectiveId, ItemType, Kind, MachineDef, MachineId, Tag,
     DUP_CLONE_CHANCE, QUALITY_CAP,
 };
 use crate::rng::Rng;
@@ -118,6 +118,8 @@ pub struct Sim {
     pub jam_ticks: u32,
     /// Moves that happened on the most recent `step()`. Cleared each tick.
     pub moves: Vec<Move>,
+    /// The spot market: one item type paying a multiple this shift.
+    demand: Option<(ItemType, f64)>,
 }
 
 impl Sim {
@@ -148,6 +150,7 @@ impl Sim {
         let mut sim = Sim {
             w, h, tiles, rng: Rng::new(seed), next_id: 1,
             tick: 0, delivered: Vec::new(), jam_ticks: 0, moves: Vec::new(),
+            demand: None,
         };
         sim.apply_auras(placements);
         Ok(sim)
@@ -170,6 +173,22 @@ impl Sim {
         let id = self.next_id;
         self.next_id += 1;
         Item { id, ty, quality: quality.min(QUALITY_CAP) }
+    }
+
+    /// The spot market: deliveries of `ty` pay `mult` × their value this shift.
+    pub fn set_demand(&mut self, ty: ItemType, mult: f64) {
+        self.demand = Some((ty, mult));
+    }
+
+    /// A blanket work-rate change for every machine carrying `tag` — the
+    /// audit-inspection lever. Same flat per-tile resolution as auras.
+    pub fn apply_tag_speed(&mut self, tag: Tag, mult: f64) {
+        for t in self.tiles.iter_mut() {
+            let Some(mdef) = t.def else { continue };
+            if mdef.tags.contains(&tag) {
+                t.speed *= mult;
+            }
+        }
     }
 
     /// Directives are run-wide buffs keyed by machine tag, resolved into the
@@ -296,9 +315,14 @@ impl Sim {
         let d = self.tiles[i].def.unwrap();
         match d.kind {
             Kind::Vault => {
+                let mut value = item_value(item.ty, item.quality);
+                if let Some((ty, mult)) = self.demand {
+                    if ty == item.ty {
+                        value *= mult;
+                    }
+                }
                 self.delivered.push(Delivery {
-                    tick: self.tick, ty: item.ty, quality: item.quality,
-                    value: item_value(item.ty, item.quality),
+                    tick: self.tick, ty: item.ty, quality: item.quality, value,
                 });
             }
             _ if d.transport => {

@@ -25,6 +25,15 @@ impl ItemType {
     }
 }
 
+pub const ITEM_TYPES: [ItemType; 12] = [
+    ItemType::Ore, ItemType::Sap, ItemType::Crystal,
+    ItemType::Ingot, ItemType::Resin, ItemType::Shard,
+    ItemType::Gear, ItemType::Circuit, ItemType::Lens,
+    ItemType::Engine, ItemType::Core, ItemType::Beacon,
+];
+
+pub const TAGS: [Tag; 5] = [Tag::Heat, Tag::Kinetic, Tag::Volt, Tag::Precision, Tag::Organic];
+
 pub const QUALITY_STEP: f64 = 0.25;
 pub const QUALITY_CAP: i32 = 10; // raised to 20 by the Overengineered relic
 

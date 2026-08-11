@@ -684,6 +684,17 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         overflow_core::run::shop_price_mult(g.round)
     );
 
+    // The round's chance elements: what the spot market pays double for,
+    // and (audit rounds) which tag the inspectors are slowing down. During
+    // the shop these describe the round about to start.
+    let _ = write!(s, "\"market\":\"{}\",\"marketMult\":{},", item_key(g.market), overflow_core::run::MARKET_MULT);
+    match g.audit_tag {
+        Some(t) => {
+            let _ = write!(s, "\"auditTag\":\"{}\",", tag_key(t));
+        }
+        None => s.push_str("\"auditTag\":null,"),
+    }
+
     // The flow graph: every output edge on the board, and whether the tile it
     // points at can actually take items from it. This is what lets the
     // renderer draw belts as connected paths and flag misrouted arrows,

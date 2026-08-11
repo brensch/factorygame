@@ -25,8 +25,16 @@ use std::time::Instant;
 
 // ── LaneBot ──────────────────────────────────────────────────────────────────
 
+/// The vault row: lanes join a shared spine one column west of the vault.
+const VY: i32 = BOARD_H / 2;
+const SPINE: i32 = BOARD_W - 2;
+
 /// Lane rows in build order: centre first (shortest transit), spreading out.
-const LANES: [i32; 7] = [3, 2, 4, 1, 5, 0, 6];
+fn lanes() -> Vec<i32> {
+    let mut rows: Vec<i32> = (0..BOARD_H).collect();
+    rows.sort_by_key(|&y| ((y - VY).abs(), y));
+    rows
+}
 
 struct LaneBot {
     started: Vec<i32>,
@@ -37,26 +45,27 @@ impl LaneBot {
         Self { started: Vec::new() }
     }
 
-    /// Belt path for a lane: east along the row, then down/up column 8 to the
-    /// vault row, sharing the spine with other lanes.
+    /// Belt path for a lane: east along the row, then down/up the spine
+    /// column to the vault row, sharing the spine with other lanes.
     fn belt_plan(y: i32) -> Vec<(i32, i32, Dir)> {
         let mut plan: Vec<(i32, i32, Dir)> = Vec::new();
         for x in [1, 2, 3] {
             plan.push((x, y, Dir::E));
         }
-        for x in [5, 6, 7] {
+        for x in 5..SPINE {
             plan.push((x, y, Dir::E));
         }
-        if y == 3 {
-            plan.push((8, 3, Dir::E));
+        if y == VY {
+            plan.push((SPINE, VY, Dir::E));
         } else {
-            let toward = if y < 3 { Dir::S } else { Dir::N };
-            plan.push((8, y, toward));
-            let range: Vec<i32> = if y < 3 { (y + 1..3).collect() } else { (4..y).rev().collect() };
+            let toward = if y < VY { Dir::S } else { Dir::N };
+            plan.push((SPINE, y, toward));
+            let range: Vec<i32> =
+                if y < VY { (y + 1..VY).collect() } else { (VY + 1..y).rev().collect() };
             for yy in range {
-                plan.push((8, yy, toward));
+                plan.push((SPINE, yy, toward));
             }
-            plan.push((8, 3, Dir::E));
+            plan.push((SPINE, VY, Dir::E));
         }
         plan
     }
@@ -66,13 +75,13 @@ impl LaneBot {
     }
 
     fn build(&mut self, g: &mut Game) {
-        // Slot Polishers inline on the vault approach whenever we're dealt one.
+        // Slot Polishers inline on the vault approach whenever we hold one.
         while let Some(i) = g.hand.iter().position(|c| c.machine == MachineId::Polisher) {
-            let spot = [(7, 3), (6, 3), (8, 2), (8, 4)]
+            let spot = [(SPINE - 1, VY), (SPINE - 2, VY), (SPINE, VY - 1), (SPINE, VY + 1)]
                 .into_iter()
                 .find(|&(x, y)| !Self::occupied(g, x, y));
             let Some((x, y)) = spot else { break };
-            let d = if y == 3 { Dir::E } else if y < 3 { Dir::S } else { Dir::N };
+            let d = if y == VY { Dir::E } else if y < VY { Dir::S } else { Dir::N };
             if g.play_card(i, x, y, Some(d), None, None).is_err() {
                 break;
             }
@@ -98,7 +107,7 @@ impl LaneBot {
         }
 
         // Open new lanes while we hold a Drill and a Furnace for one.
-        while let Some(&lane) = LANES.iter().find(|l| !self.started.contains(l)) {
+        while let Some(lane) = lanes().into_iter().find(|l| !self.started.contains(l)) {
             let Some(di) = g.hand.iter().position(|c| c.machine == MachineId::Drill) else { break };
             if g.play_card(di, 0, lane, Some(Dir::E), None, None).is_err() {
                 break;
@@ -107,6 +116,12 @@ impl LaneBot {
             if let Some(fi) = g.hand.iter().position(|c| c.machine == MachineId::Furnace) {
                 let _ = g.play_card(fi, 4, lane, Some(Dir::E), None, None);
             }
+        }
+
+        // (Re)lay belts for every lane ever started: laying is idempotent
+        // (occupied tiles skip), so runs the bot couldn't afford last round
+        // get completed as soon as credits allow.
+        for lane in self.started.clone() {
             for (x, y, d) in Self::belt_plan(lane) {
                 if !Self::occupied(g, x, y) {
                     let _ = g.buy_belt(x, y, d);
@@ -115,16 +130,31 @@ impl LaneBot {
         }
     }
 
-    /// Shop strategy: lane-relevant directives first (they compound), then
-    /// preferred machines, rerolling a few times while flush to fish.
+    /// Shop strategy: lane throughput first (drills and furnaces are what a
+    /// widening bot actually converts into payout), luxuries with leftovers,
+    /// rerolling a few times while flush to fish.
     fn shop(&self, g: &mut Game) {
         const PREF: [MachineId; 5] = [
-            MachineId::Polisher, MachineId::Heatsink, MachineId::Drill,
-            MachineId::Furnace, MachineId::Overclock,
+            MachineId::Drill, MachineId::Furnace, MachineId::Heatsink,
+            MachineId::Polisher, MachineId::Overclock,
         ];
         let mut rerolls = 0;
         loop {
             let mut bought = false;
+            for want in PREF {
+                while let Some(i) = g
+                    .offers
+                    .iter()
+                    .position(|o| matches!(*o, Offer::Machine(c) if c.machine == want))
+                {
+                    // keep a belt budget: a machine that can't be wired in is
+                    // dead weight on the board
+                    if g.credits < g.offer_price(g.offers[i]) + 12 || g.shop_buy(i).is_err() {
+                        break;
+                    }
+                    bought = true;
+                }
+            }
             while let Some(i) = g.offers.iter().position(|o| {
                 matches!(
                     *o,
@@ -135,18 +165,6 @@ impl LaneBot {
                     break;
                 }
                 bought = true;
-            }
-            for want in PREF {
-                while let Some(i) = g
-                    .offers
-                    .iter()
-                    .position(|o| matches!(*o, Offer::Machine(c) if c.machine == want))
-                {
-                    if g.shop_buy(i).is_err() {
-                        break;
-                    }
-                    bought = true;
-                }
             }
             if !bought {
                 if rerolls < 4 && g.credits > g.reroll_price() * 4 && g.shop_reroll().is_ok() {

@@ -62,28 +62,28 @@ fn a_whole_round_through_the_wire_format() {
 
     // Drill at the west edge, furnace mid-lane, belts between and out.
     let drill = h.iter().position(|m| m == "drill").unwrap();
-    let s = call(play(drill as u32, 0, 3, E, -1, -1));
+    let s = call(play(drill as u32, 0, 7, E, -1, -1));
     h = hand(&s);
     assert_eq!(h.len(), 3, "playing consumes the card");
     let furnace = h.iter().position(|m| m == "furnace").unwrap();
-    let s = call(play(furnace as u32, 4, 3, E, -1, -1));
+    let s = call(play(furnace as u32, 4, 7, E, -1, -1));
     assert_eq!(field(&s, "err"), "null");
-    for x in [1, 2, 3, 5, 6, 7, 8] {
-        call(belt(x, 3, E));
+    for x in (1..=3).chain(5..=12) {
+        call(belt(x, 7, E));
     }
     let s = call(state());
-    assert_eq!(num(&s, "credits"), 15 - 7); // placement is free; belts aren't
+    assert_eq!(num(&s, "credits"), 15 - 11); // placement is free; belts aren't
 
     // Projection clears the quota before we commit.
     let p = call(project());
     assert!(num(&p, "payout") >= 20, "projection: {p}");
 
     // Rotate is a real edit: projection collapses when the drill faces away.
-    call(rotate(0, 3));
+    call(rotate(0, 7));
     let broken = call(project());
     assert!(num(&broken, "payout") < 20, "drill facing south: {broken}");
     for _ in 0..3 {
-        call(rotate(0, 3));
+        call(rotate(0, 7));
     }
 
     // The animated shift: step to done, items visibly in flight on the way.
@@ -114,22 +114,42 @@ fn a_whole_round_through_the_wire_format() {
     let offers = &s[offers_at..offers_at + s[offers_at..].find(']').unwrap()];
     assert_eq!(offers.matches("\"name\":").count(), 5, "a full rack: {s}");
 
-    // Buy one (surplus covers any rack price), reroll, then leave.
+    // The round's chance elements are on the wire: the spot market for the
+    // upcoming round, rolled while you can still shop for it.
+    assert!(s.contains("\"market\":\""), "{s}");
+
+    // Prices bite now: fund a purchase by selling the two unplayed
+    // blueprints, then take whatever the rack will sell us.
+    call(sell_hand(0));
+    let s = call(sell_hand(0));
+    assert_eq!(hand(&s).len(), 0);
     let credits = num(&s, "credits");
-    let s = call(shop_buy(0));
-    assert_eq!(field(&s, "err"), "null", "{s}");
+    let mut bought = false;
+    for i in 0..5u32 {
+        let s = call(shop_buy(i));
+        if field(&s, "err") == "null" {
+            bought = true;
+            break;
+        }
+    }
+    assert!(bought, "even after selling out, nothing on the rack was affordable");
+    let s = call(state());
     assert!(num(&s, "credits") < credits);
+    assert_eq!(hand(&s).len(), 1);
+
     let before_reroll = num(&s, "credits");
     let reroll_price = num(&s, "rerollPrice");
-    let s = call(shop_reroll());
-    assert_eq!(num(&s, "credits"), before_reroll - reroll_price);
-    assert_eq!(num(&s, "rerollPrice"), reroll_price * 2, "rerolls escalate");
+    if before_reroll >= reroll_price {
+        let s = call(shop_reroll());
+        assert_eq!(num(&s, "credits"), before_reroll - reroll_price);
+        assert_eq!(num(&s, "rerollPrice"), reroll_price * 2, "rerolls escalate");
+    }
 
     let s = call(shop_done());
     assert_eq!(field(&s, "phase"), "build");
     assert_eq!(num(&s, "round"), 1);
     assert_eq!(num(&s, "quota"), 45);
-    assert_eq!(hand(&s).len(), 3, "2 unplayed + 1 bought: {s}");
+    assert_eq!(hand(&s).len(), 1, "sold 2, bought 1: {s}");
 }
 
 #[test]

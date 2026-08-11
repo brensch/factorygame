@@ -72,18 +72,10 @@ pub fn shop_rack(unlocked: &[MachineId], n: usize, rng: &mut Rng) -> Vec<Offer> 
     out
 }
 
-/// What a fresh profile has unlocked. Meta-progression grows this; the lab
-/// bots use it as-is.
+/// What a fresh profile has unlocked: the whole pool. The cross-chain
+/// assemblers (Circuit Bench, Lens Grinder, Engine Works) used to be
+/// meta-locked, which quietly forced every run down the metal chain — the
+/// opposite of the "many viable routes" goal. Shop inflation gates them now.
 pub fn default_unlocked() -> Vec<MachineId> {
-    // Everything except the deep tier-3/4 machines, which unlock by milestone.
-    CARD_POOL
-        .iter()
-        .copied()
-        .filter(|m| {
-            !matches!(
-                m,
-                MachineId::EngineWorks | MachineId::LensGrinder | MachineId::CircuitBench
-            )
-        })
-        .collect()
+    CARD_POOL.to_vec()
 }

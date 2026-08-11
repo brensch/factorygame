@@ -72,6 +72,24 @@ Same-day revisions after play (2026-08-10, v2.1):
 - **Retry**: a missed quota offers "retry the round" (board/hand/credits as you left them).
   Free for now; a real run structure may want to price it (a debt? a relic slot?).
 
+Third revision same day (v2.2) — chance and interplay:
+
+- **Spot market**: every round one item type pays 2× at the vault, rolled when the shop
+  opens so purchases can chase it. This is the "keep a second chain alive" incentive —
+  single-path boards eat dead markets.
+- **Audit inspections**: audit rounds (4/8/12) slow a random tag to 60% speed, revealed in
+  the shop. Doctrine over-commitment now carries real risk.
+- **Cross-chain assemblers unlocked** (Circuit Bench, Lens Grinder, Engine Works were
+  meta-locked, silently forcing the metal chain). Shop inflation gates them instead.
+- **Board 14×14** (was 10×7), square for mobile, vault mid-east-edge. Longer transit
+  noticeably tightens early rounds.
+- **Price retune after measurement**: mult = max(3, next_quota/35). The first attempt
+  (max(4, /25)) drove LaneBot's median death to round 2 — too brutal even for the
+  wanted crunch. Current: median 3, deaths spread over quotas 90/200/400, near-zero
+  round-2 deaths. LaneBot also grew lane-repair and a belt-budget reserve; without them
+  it bankrupted itself buying machines it couldn't wire in (an instructive failure —
+  human players face the same trap, but they can see it).
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

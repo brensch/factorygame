@@ -23,7 +23,7 @@ fn rotate_cycles_clockwise_through_all_four_edges() {
 #[test]
 fn rotate_refuses_the_vault_and_empty_tiles() {
     let mut g = Game::new(1);
-    assert!(g.rotate(9, 3).is_err()); // the vault
+    assert!(g.rotate(13, 7).is_err()); // the vault
     assert!(g.rotate(4, 4).is_err()); // empty
 }
 
@@ -69,11 +69,11 @@ fn filter_gate_refuses_non_filters() {
 fn stepped_shift_sim_matches_the_committed_shift_exactly() {
     let mut g = Game::new(42);
     let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
-    g.play_card(drill, 0, 3, Some(Dir::E), None, None).unwrap();
+    g.play_card(drill, 0, 7, Some(Dir::E), None, None).unwrap();
     let furnace = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
-    g.play_card(furnace, 4, 3, Some(Dir::E), None, None).unwrap();
-    for x in [1, 2, 3, 5, 6, 7, 8] {
-        g.buy_belt(x, 3, Dir::E).unwrap();
+    g.play_card(furnace, 4, 7, Some(Dir::E), None, None).unwrap();
+    for x in (1..=3).chain(5..=12) {
+        g.buy_belt(x, 7, Dir::E).unwrap();
     }
 
     // Animate: step the sim one tick at a time, as the renderer will.
@@ -138,12 +138,12 @@ fn blocked_or_out_of_bounds_group_move_changes_nothing() {
 fn the_vault_stays_bolted_down() {
     let mut g = Game::new(1);
     // Selecting only the vault: nothing movable.
-    assert!(g.move_by(&[(9, 3)], 1, 0).is_err());
+    assert!(g.move_by(&[(13, 7)], 1, 0).is_err());
     // A selection sweeping over the vault moves everything else and leaves it.
-    g.buy_belt(8, 3, Dir::E).unwrap();
-    g.move_by(&[(8, 3), (9, 3)], 0, 1).unwrap();
-    assert!(g.board.iter().any(|p| p.x == 9 && p.y == 3 && p.m == MachineId::Vault));
-    assert!(g.board.iter().any(|p| p.x == 8 && p.y == 4 && p.m == MachineId::Belt));
+    g.buy_belt(12, 7, Dir::E).unwrap();
+    g.move_by(&[(12, 7), (13, 7)], 0, 1).unwrap();
+    assert!(g.board.iter().any(|p| p.x == 13 && p.y == 7 && p.m == MachineId::Vault));
+    assert!(g.board.iter().any(|p| p.x == 12 && p.y == 8 && p.m == MachineId::Belt));
 }
 
 #[test]

@@ -51,16 +51,16 @@ test("the shipped wasm plays a full round over the ABI", async () => {
 
   // Seed 42 deals 2 Drills + 2 Furnaces (pinned by the Rust tests).
   const drill = s.hand.findIndex((c: any) => c.m === "drill");
-  s = read(core.play(drill, 0, 3, E, -1, -1));
+  s = read(core.play(drill, 0, 7, E, -1, -1));
   expect(s.err).toBeNull();
   const furnace = s.hand.findIndex((c: any) => c.m === "furnace");
-  s = read(core.play(furnace, 4, 3, E, -1, -1));
+  s = read(core.play(furnace, 4, 7, E, -1, -1));
   expect(s.err).toBeNull();
-  for (const x of [1, 2, 3, 5, 6, 7, 8]) {
-    s = read(core.belt(x, 3, E));
+  for (const x of [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12]) {
+    s = read(core.belt(x, 7, E));
     expect(s.err).toBeNull();
   }
-  expect(s.credits).toBe(15 - 7); // placement is free; belts aren't
+  expect(s.credits).toBe(15 - 11); // placement is free; belts aren't
 
   const p = read(core.project());
   expect(p.payout).toBeGreaterThanOrEqual(20);
@@ -74,7 +74,7 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   for (let i = 0; i < 60; i++) {
     frame = read(core.shift_step());
     if (frame.items.length > 0) sawItems = true;
-    if (frame.hops.some((h: any) => h.x === 9 && h.y === 3)) sawVaultHop = true;
+    if (frame.hops.some((h: any) => h.x === 13 && h.y === 7)) sawVaultHop = true;
     if (frame.done) break;
   }
   expect(frame.done).toBe(true);
@@ -89,11 +89,9 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   expect(s.offers.length).toBe(5);
   expect(s.nextQuota).toBe(45);
 
-  // the surplus buys a blueprint into the persistent hand
-  const handBefore = s.hand.length;
-  s = read(core.shop_buy(0));
-  expect(s.err).toBeNull();
-  expect(s.hand.length).toBe(handBefore + 1);
+  // prices scale with the curve; the wire carries the chance elements
+  expect(typeof s.market).toBe("string");
+  expect(s.rerollPrice).toBeGreaterThan(0);
 
   s = read(core.shop_done());
   expect(s.phase).toBe("build");

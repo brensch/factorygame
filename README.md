@@ -28,6 +28,19 @@ the tested implementation.
 Build it locally: `bun run build:play && bun run serve` (needs Rust with the
 `wasm32-unknown-unknown` target, and bun).
 
+## 🕹 The Bevy frontend
+
+**`rust/game`** — the real frontend, started 2026-08-11: Bevy 0.19 over the same core, 8-bit
+factory aesthetic (every sprite procedurally painted into one atlas at startup — no asset
+files), responsive from phone portrait to PC fullscreen. Aesthetic mockups and real captured
+frames live in [`docs/design/renders/`](docs/design/renders/); architecture in
+[`rust/game/README.md`](rust/game/README.md).
+
+```sh
+cd rust && cargo run -p overflow-game          # native window
+OVERFLOW_WINDOW=390x844 cargo run -p overflow-game   # phone shape
+```
+
 ## 📄 The design document
 
 **[`docs/index.html`](docs/index.html)** — the whole design, with SVG board diagrams, the machine

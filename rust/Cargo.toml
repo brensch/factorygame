@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["core", "lab", "web"]
+members = ["core", "game", "lab", "web"]
+# Bare `cargo test`/`cargo clippy` skip the Bevy frontend so CI and quick
+# local loops never pay its compile bill; build it with -p overflow-game.
+default-members = ["core", "lab", "web"]
 
 [workspace.package]
 edition = "2021"
@@ -8,3 +11,11 @@ license = "MIT"
 
 [profile.release]
 lto = "thin"
+
+# Bevy is unusable at opt-level 0; keep our code fast to compile and
+# dependencies fast to run, per upstream guidance.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

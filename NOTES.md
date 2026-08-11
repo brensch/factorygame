@@ -273,3 +273,46 @@ The wasm frontend already implements the pattern the Bevy renderer should copy:
 - Items render as one instanced draw with per-instance colour. Never a scene node per item.
 - The renderer reads state and never writes back; every mutation goes through the same
   command surface the wasm ABI exposes today (`rust/web/src/lib.rs` is the de facto spec).
+
+---
+
+# v4.0 — the Bevy frontend (2026-08-11)
+
+The renders came first, then the engine. `docs/design/renders/` holds both:
+`mock_*.png` are the aesthetic mockups (HTML canvas pixel-art, screenshotted)
+that locked the look — dark industrial ground, rust-orange copper, furnace
+glow, hazard-stripe bays, 3×5 pixel font — and `bevy_*.png` are real frames
+from the running Bevy build reproducing them.
+
+## What shipped
+
+- `rust/game`: Bevy 0.19 over `overflow-core` directly — no JSON, no wire
+  format, no rules in the frontend. See `rust/game/README.md` for the
+  module map (bridge / atlas / layout / scene / input / theme).
+- **Every sprite is generated.** One atlas texture painted pixel-by-pixel at
+  startup: machine plates per kind, emblems per machine, 3-phase belt
+  treads, ports, items, glyphs. The art style is code you can diff.
+- **Immediate-mode scene + hit list.** On any state change the scene
+  despawns and repaints, registering clickable regions as it draws. UI and
+  interaction cannot drift apart.
+- **Responsive for real.** Integer-zoom virtual pixels; portrait centres
+  the board between HUD and fan (phone), landscape puts tools in a rail
+  (PC). `OVERFLOW_WINDOW=390x844` to try the phone shape.
+- **Verified headless.** `OVERFLOW_SCRIPT=demo` plays the harness-test
+  factory over the bridge (allocate → furnaces → lanes → morning shift)
+  and screenshots keyframes under WSLg/llvmpipe. The captured frames show
+  items flowing, the quota banking (56/130 after one shift, matching the
+  wasm harness), the redeal, and the warm factory.
+
+## What the prototype still has that Bevy doesn't yet
+
+multiselect drag-move, the card info panel, filter gates UI, contract
+drag-reorder (right-click sell works), the pay-slip modal detail per
+contract, fog. The shop/supply overlays are functional but plain. Browser
+deployment needs wasm-bindgen — deliberate follow-up, not wired yet.
+
+## The call to make while playing
+
+The tap-to-rotate gesture (bare tap on a machine rotates it) is a guess at
+a good touch primitive. If it misfires during real play, replace with a
+selected-machine toolbar.

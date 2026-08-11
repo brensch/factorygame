@@ -25,3 +25,18 @@ jobs:
       - run: cargo build -p overflow-core -p overflow-web --target wasm32-unknown-unknown
       # the lab is the balance instrument; make sure a batch actually runs
       - run: cargo run --release -p overflow-lab -- --runs 200 --seed 1
+
+  # The Bevy frontend compiles in its own cached job so the fast loop above
+  # never waits on it (it is outside the workspace default-members too).
+  game:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo clippy -p overflow-game -- -D warnings

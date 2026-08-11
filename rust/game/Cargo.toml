@@ -1,0 +1,24 @@
+[package]
+name = "overflow-game"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# The real frontend: Bevy over the same engine-free core the lab and the
+# wasm prototype share. Nothing in here owns a rule — it queues commands
+# at the bridge and draws whatever state comes back.
+[dependencies]
+overflow-core = { path = "../core" }
+# The "2d" meta-feature minus gamepads (bevy_gilrs needs system libudev),
+# clipboard, default font, scene serialization and picking — none of which
+# this frontend uses: sprites, our own pixel font, our own hit-testing.
+bevy = { version = "0.19", default-features = false, features = [
+    "default_app",
+    "std",
+    "bevy_winit",
+    "multi_threaded",
+    "webgl2",
+    "x11",
+    "wayland",
+    "2d_bevy_render",
+] }

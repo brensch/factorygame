@@ -18,8 +18,8 @@ use overflow_core::defs::{
     QUALITY_STEP,
 };
 use overflow_core::cards::{Card, Offer};
-use overflow_core::defs::{directive, DirectiveId};
-use overflow_core::run::{is_audit, shift_len, Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
+use overflow_core::defs::{contract, directive, ContractId, DirectiveId};
+use overflow_core::run::{is_audit, Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
 use overflow_core::sim::{FilterCfg, Placement, Sim};
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -177,10 +177,28 @@ pub extern "C" fn splitter(x: i32, y: i32, d: i32) -> usize {
     command(|g| g.buy_splitter(x, y, dir_from(d)?))
 }
 
-/// After a missed quota: rewind to the build phase of the same round.
+/// After a missed quota: rewind the whole round and try again.
 #[no_mangle]
 pub extern "C" fn retry() -> usize {
     command(|g| g.retry_round())
+}
+
+/// Place a scrap chute — swallows anything, pays nothing.
+#[no_mangle]
+pub extern "C" fn chute(x: i32, y: i32) -> usize {
+    command(|g| g.buy_chute(x, y))
+}
+
+/// Buy the shipment at `lot_idx`, queueing it at bay `bay_idx`.
+#[no_mangle]
+pub extern "C" fn buy_lot(lot_idx: u32, bay_idx: u32) -> usize {
+    command(|g| g.buy_lot(lot_idx as usize, bay_idx as usize))
+}
+
+/// Set a Filter's item-type gate: an ITEM_TYPES code, or -1 to clear.
+#[no_mangle]
+pub extern "C" fn set_type_gate(x: i32, y: i32, ty: i32) -> usize {
+    command(|g| g.set_filter_type(x, y, if ty < 0 { None } else { item_from(ty) }))
 }
 
 /// Dry-run the whole shift: `{"payout":..,"inFlight":..,"jamTicks":..}`.
@@ -212,7 +230,7 @@ pub extern "C" fn shift_start() -> usize {
 #[no_mangle]
 pub extern "C" fn shift_step() -> usize {
     with_app(|app| {
-        let total = shift_len(app.game.round);
+        let total = app.game.shift_ticks();
         let Some(sim) = app.shift.as_mut() else {
             return err_json("no shift running");
         };
@@ -308,6 +326,21 @@ fn machine_key(m: MachineId) -> &'static str {
         M::Heatsink => "heatsink",
         M::Dup => "dup",
         M::Vault => "vault",
+        M::Bay => "bay",
+        M::Chute => "chute",
+    }
+}
+
+fn contract_key(c: ContractId) -> &'static str {
+    match c {
+        ContractId::TarSands => "tarsands",
+        ContractId::BulkManifests => "bulk",
+        ContractId::SweetTooth => "sweettooth",
+        ContractId::GentleHands => "gentlehands",
+        ContractId::GearSyndicate => "gearsyndicate",
+        ContractId::PuristClause => "purist",
+        ContractId::FluxInjector => "fluxinjector",
+        ContractId::NightShifts => "nightshifts",
     }
 }
 
@@ -337,7 +370,21 @@ fn item_key(t: ItemType) -> &'static str {
         I::Engine => "engine",
         I::Core => "core",
         I::Beacon => "beacon",
+        I::Flux => "flux",
+        I::Slag => "slag",
     }
+}
+
+fn item_from(code: i32) -> Option<ItemType> {
+    use ItemType as I;
+    Some(match code {
+        0 => I::Ore, 1 => I::Sap, 2 => I::Crystal,
+        3 => I::Ingot, 4 => I::Resin, 5 => I::Shard,
+        6 => I::Gear, 7 => I::Circuit, 8 => I::Lens,
+        9 => I::Engine, 10 => I::Core, 11 => I::Beacon,
+        12 => I::Flux, 13 => I::Slag,
+        _ => return None,
+    })
 }
 
 fn directive_key(d: DirectiveId) -> &'static str {
@@ -390,7 +437,9 @@ fn blurb(m: MachineId) -> String {
             "Items passing through have a {:.0}% chance to be cloned; the clone follows once the path ahead clears. In a loop, this is the exponential — and the brick.",
             DUP_CLONE_CHANCE * 100.0
         ),
-        M::Vault => "Deliver here. Pays base value × (1 + 0.25 × quality). Items still on belts at the horn are forfeit.".into(),
+        M::Vault => "Deliver here. Pays base value × (1 + 0.25 × quality). The factory stays warm between shifts — nothing is forfeit anymore.".into(),
+        M::Bay => "The loading dock: streams its assigned shipment queue onto the board, one item per tick. Everything your factory eats arrives here.".into(),
+        M::Chute => "Swallows anything, pays nothing. Where slag goes to die.".into(),
     }
 }
 
@@ -489,6 +538,8 @@ fn catalog_json() -> String {
             MachineId::Junction,
             MachineId::Merger,
             MachineId::Splitter,
+            MachineId::Chute,
+            MachineId::Bay,
             MachineId::Vault,
         ])
         .enumerate()
@@ -563,9 +614,15 @@ fn push_placement(out: &mut String, p: &Placement) {
     push_dir(out, "d2", p.d2);
     match p.cfg.and_then(|c| c.min_quality) {
         Some(q) => {
-            let _ = write!(out, ",\"minQ\":{q}}}");
+            let _ = write!(out, ",\"minQ\":{q}");
         }
-        None => out.push_str(",\"minQ\":null}"),
+        None => out.push_str(",\"minQ\":null"),
+    }
+    match p.cfg.and_then(|c| c.item_type) {
+        Some(t) => {
+            let _ = write!(out, ",\"tg\":\"{}\"}}", item_key(t));
+        }
+        None => out.push_str(",\"tg\":null}"),
     }
 }
 
@@ -583,7 +640,7 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         g.round,
         g.credits,
         g.quota(),
-        shift_len(g.round),
+        g.shift_ticks(),
         is_audit(g.round),
         phase,
         won,
@@ -650,11 +707,78 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
                 push_escaped(&mut s, dd.blurb);
                 s.push_str("\"}");
             }
+            Offer::Contract(id) => {
+                let cd = contract(id);
+                let _ = write!(
+                    s,
+                    "{{\"type\":\"contract\",\"c\":\"{}\",\"name\":\"{}\",\"price\":{price},\"blurb\":\"",
+                    contract_key(id),
+                    cd.name
+                );
+                push_escaped(&mut s, cd.blurb);
+                s.push_str("\"}");
+            }
         }
     }
 
+    // The docks and their queues (summarized as runs of items).
+    s.push_str("],\"bays\":[");
+    for (i, ((bx, by), queue)) in g.bays().into_iter().zip(&g.bay_queues).enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let total: u32 = queue.iter().map(|e| e.1).sum();
+        let _ = write!(s, "{{\"x\":{bx},\"y\":{by},\"total\":{total},\"queue\":[");
+        for (j, &(ty, count, quality)) in queue.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            let _ = write!(s, "{{\"t\":\"{}\",\"n\":{count},\"q\":{quality}}}", item_key(ty));
+        }
+        s.push_str("]}");
+    }
+    s.push_str("],");
+
+    // Shipments on offer while the shop is open.
+    s.push_str("\"lotOffers\":[");
+    for (i, lot) in g.lot_offers.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(s, "{{\"name\":\"{}\",\"price\":{},\"q\":{},\"entries\":[", lot.name, lot.price, lot.quality);
+        for (j, &(ty, n)) in lot.entries.iter().enumerate() {
+            if j > 0 {
+                s.push(',');
+            }
+            let _ = write!(s, "{{\"t\":\"{}\",\"n\":{n}}}", item_key(ty));
+        }
+        s.push_str("]}");
+    }
+    s.push_str("],");
+
+    // Contracts owned (the joker layer).
+    s.push_str("\"contracts\":[");
+    for (i, &c) in g.contracts.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let cd = contract(c);
+        let _ = write!(s, "{{\"c\":\"{}\",\"name\":\"{}\"}}", contract_key(c), cd.name);
+    }
+    s.push_str("],");
+
+    // Round progress: shifts spent, deliveries banked, material in the pipes.
+    let _ = write!(
+        s,
+        "\"shiftsUsed\":{},\"shiftsMax\":{},\"roundDelivered\":{},\"carry\":{},",
+        g.shifts_used,
+        overflow_core::run::SHIFTS_PER_ROUND,
+        g.round_delivered,
+        g.carry.len()
+    );
+
     // Owned directives, aggregated with counts.
-    s.push_str("],\"directives\":[");
+    s.push_str("\"directives\":[");
     let mut seen: Vec<(DirectiveId, u32)> = Vec::new();
     for &d in &g.directives {
         match seen.iter_mut().find(|(id, _)| *id == d) {

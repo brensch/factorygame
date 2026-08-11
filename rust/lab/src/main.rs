@@ -1,73 +1,54 @@
 //! overflow-lab — headless playtesting harness.
 //!
-//! This is the groundwork for the balance workflow the game wants: bots play
-//! thousands of complete seeded runs, and the outcome distribution (how many
-//! rounds runs survive, where they die, what payouts look like) becomes the
-//! data you tune quotas and card pools against. Target a run-length
-//! distribution, change a number in `defs.rs`, re-run, diff.
+//! Bots play thousands of complete seeded runs; the outcome distribution and
+//! the per-round payout/quota ratios are the balance instruments. Target a
+//! distribution, change a number in `defs.rs`/`run.rs`, re-run, diff.
 //!
 //!   cargo run --release -p overflow-lab -- --runs 2000 --seed 1
-//!   cargo run --release -p overflow-lab -- --runs 2000 --jsonl /tmp/runs.jsonl
 //!   cargo run --release -p overflow-lab -- --bench
 //!
-//! The only bot so far is LaneBot, a deliberately naive baseline: it builds
-//! parallel drill→furnace lanes and slots Polishers in front of the vault.
-//! It knows nothing about loops, filters, or assemblers — so the round where
-//! LaneBot dies is the round the design *forces* players off pure widening.
-//! Smarter bots raise that ceiling; the gap between bots measures how much
-//! depth the mechanics actually buy.
+//! DockBot is the naive baseline for the consignment model: it feeds bought
+//! ore through splitter columns into a bank of furnaces and ships ingots.
+//! It avoids dirty lots entirely (it owns no filters), ignores the market,
+//! and never builds tier 2 — so wherever DockBot dies is the floor the
+//! quota curve leans on.
 
 use overflow_core::cards::Offer;
-use overflow_core::defs::{Dir, DirectiveId, MachineId};
+use overflow_core::defs::{ContractId, Dir, DirectiveId, ItemType, MachineId};
 use overflow_core::run::{Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
 use overflow_core::sim::{Placement, Sim};
 use std::time::Instant;
 
-// ── LaneBot ──────────────────────────────────────────────────────────────────
+// ── DockBot ──────────────────────────────────────────────────────────────────
 
-/// The vault row: lanes join a shared spine one column west of the vault.
-const VY: i32 = BOARD_H / 2;
+const VY: i32 = BOARD_H / 2; // vault row
 const SPINE: i32 = BOARD_W - 2;
 
-/// Lane rows in build order: centre first (shortest transit), spreading out.
-fn lanes() -> Vec<i32> {
-    let mut rows: Vec<i32> = (0..BOARD_H).collect();
-    rows.sort_by_key(|&y| ((y - VY).abs(), y));
-    rows
+/// One furnace lane: the splitter that feeds it, the furnace tile, its row.
+struct Lane {
+    row: i32,
+    split_dir: Dir, // which way the distribution column continues
 }
 
-struct LaneBot {
-    started: Vec<i32>,
+/// Lanes in build order: three off each bay's distribution column.
+fn lanes() -> Vec<Lane> {
+    vec![
+        Lane { row: VY - 3, split_dir: Dir::S },
+        Lane { row: VY - 2, split_dir: Dir::S },
+        Lane { row: VY - 1, split_dir: Dir::S },
+        Lane { row: VY + 3, split_dir: Dir::N },
+        Lane { row: VY + 2, split_dir: Dir::N },
+        Lane { row: VY + 1, split_dir: Dir::N },
+    ]
 }
 
-impl LaneBot {
+struct DockBot {
+    built: usize, // lanes opened so far
+}
+
+impl DockBot {
     fn new() -> Self {
-        Self { started: Vec::new() }
-    }
-
-    /// Drill column: lanes build COMPACT, hugging the vault. On a big board
-    /// the west-edge-to-east-edge lane of the first bot tripled its own infra
-    /// bill and measured the board, not the game.
-    const X0: i32 = SPINE - 3;
-
-    /// Belt path for a lane: a short hop to the spine column, then down/up
-    /// the spine to the vault row, sharing the spine with other lanes.
-    fn belt_plan(y: i32) -> Vec<(i32, i32, Dir)> {
-        let mut plan: Vec<(i32, i32, Dir)> = Vec::new();
-        plan.push((Self::X0 + 2, y, Dir::E));
-        if y == VY {
-            plan.push((SPINE, VY, Dir::E));
-        } else {
-            let toward = if y < VY { Dir::S } else { Dir::N };
-            plan.push((SPINE, y, toward));
-            let range: Vec<i32> =
-                if y < VY { (y + 1..VY).collect() } else { (VY + 1..y).rev().collect() };
-            for yy in range {
-                plan.push((SPINE, yy, toward));
-            }
-            plan.push((SPINE, VY, Dir::E));
-        }
-        plan
+        Self { built: 0 }
     }
 
     fn occupied(g: &Game, x: i32, y: i32) -> bool {
@@ -75,81 +56,121 @@ impl LaneBot {
     }
 
     fn build(&mut self, g: &mut Game) {
-        // Slot Polishers inline on the vault approach whenever we hold one.
-        while let Some(i) = g.hand.iter().position(|c| c.machine == MachineId::Polisher) {
-            let spot = [(SPINE - 1, VY), (SPINE - 2, VY), (SPINE, VY - 1), (SPINE, VY + 1)]
-                .into_iter()
-                .find(|&(x, y)| !Self::occupied(g, x, y));
-            let Some((x, y)) = spot else { break };
-            let d = if y == VY { Dir::E } else if y < VY { Dir::S } else { Dir::N };
-            if g.play_card(i, x, y, Some(d), None, None).is_err() {
-                break;
+        // The fab in the starting kit is dead weight for a widening bot.
+        if let Some(i) = g.hand.iter().position(|c| c.machine == MachineId::Fab) {
+            let _ = g.sell_blueprint(i);
+        }
+
+        // Trunk: bay feed belts and the overflow row straight to the vault
+        // (unsmelted ore still pays pennies rather than clogging).
+        let mut trunk: Vec<(i32, i32, Dir)> = vec![(1, VY - 3, Dir::E), (1, VY + 3, Dir::E)];
+        for x in 3..SPINE {
+            trunk.push((x, VY, Dir::E));
+        }
+        trunk.push((SPINE, VY, Dir::E));
+        for (x, y, d) in trunk {
+            if !Self::occupied(g, x, y) {
+                let _ = g.buy_belt(x, y, d);
             }
         }
 
-        // Heat Sinks go beside an existing Furnace.
-        while let Some(i) = g.hand.iter().position(|c| c.machine == MachineId::Heatsink) {
-            let furnaces: Vec<(i32, i32)> = g
-                .board
-                .iter()
-                .filter(|p| p.m == MachineId::Furnace)
-                .map(|p| (p.x, p.y))
-                .collect();
-            let spot = furnaces.iter().find_map(|&(fx, fy)| {
-                [(fx, fy + 1), (fx, fy - 1)]
-                    .into_iter()
-                    .find(|&(x, y)| x >= 0 && y >= 0 && x < BOARD_W && y < BOARD_H && !Self::occupied(g, x, y))
-            });
-            let Some((x, y)) = spot else { break };
-            if g.play_card(i, x, y, None, None, None).is_err() {
+        // Open lanes while we hold furnaces: splitter on the column, furnace
+        // beside it, output row east, spine to the vault row.
+        while self.built < lanes().len() {
+            let Some(fi) = g.hand.iter().position(|c| c.machine == MachineId::Furnace) else {
+                break;
+            };
+            let lane = &lanes()[self.built];
+            if g.play_card(fi, 3, lane.row, Some(Dir::E), None, None).is_err() {
                 break;
             }
+            self.built += 1;
         }
 
-        // Open new lanes while we hold a Drill and a Furnace for one.
-        while let Some(lane) = lanes().into_iter().find(|l| !self.started.contains(l)) {
-            let Some(di) = g.hand.iter().position(|c| c.machine == MachineId::Drill) else { break };
-            if g.play_card(di, Self::X0, lane, Some(Dir::E), None, None).is_err() {
-                break;
-            }
-            self.started.push(lane);
-            if let Some(fi) = g.hand.iter().position(|c| c.machine == MachineId::Furnace) {
-                let _ = g.play_card(fi, Self::X0 + 1, lane, Some(Dir::E), None, None);
-            }
-        }
-
-        // (Re)lay belts for every lane ever started: laying is idempotent
-        // (occupied tiles skip), so runs the bot couldn't afford last round
-        // get completed as soon as credits allow.
-        for lane in self.started.clone() {
-            for (x, y, d) in Self::belt_plan(lane) {
-                if !Self::occupied(g, x, y) {
-                    let _ = g.buy_belt(x, y, d);
+        // (Re)lay lane plumbing for every opened lane — idempotent, so runs
+        // broken by a thin wallet complete as soon as credits allow.
+        for lane in lanes().iter().take(self.built) {
+            if !Self::occupied(g, 2, lane.row) && g.buy_splitter(2, lane.row, lane.split_dir).is_ok() {
+                // point the eject edge east into the furnace (buy_splitter
+                // defaults d2 to clockwise-of-d, which is west for a
+                // south-running column)
+                while g
+                    .board
+                    .iter()
+                    .find(|p| p.x == 2 && p.y == lane.row)
+                    .and_then(|p| p.d2)
+                    != Some(Dir::E)
+                {
+                    g.rotate_d2(2, lane.row).unwrap();
                 }
+            }
+            for x in 4..SPINE {
+                if !Self::occupied(g, x, lane.row) {
+                    let _ = g.buy_belt(x, lane.row, Dir::E);
+                }
+            }
+            let toward = if lane.row < VY { Dir::S } else { Dir::N };
+            if !Self::occupied(g, SPINE, lane.row) {
+                let _ = g.buy_belt(SPINE, lane.row, toward);
+            }
+            let range: Vec<i32> = if lane.row < VY {
+                (lane.row + 1..VY).collect()
+            } else {
+                (VY + 1..lane.row).rev().collect()
+            };
+            for yy in range {
+                if !Self::occupied(g, SPINE, yy) {
+                    let _ = g.buy_belt(SPINE, yy, toward);
+                }
+            }
+            // splitter column terminals: dump leftovers onto the overflow row
+            let term = if lane.row < VY { VY - 1 } else { VY + 1 };
+            for yy in [term] {
+                if !Self::occupied(g, 2, yy) {
+                    let _ = g.buy_belt(2, yy, if lane.row < VY { Dir::S } else { Dir::N });
+                }
+            }
+            if !Self::occupied(g, 2, VY) {
+                let _ = g.buy_belt(2, VY, Dir::E);
             }
         }
     }
 
-    /// Shop strategy: lane throughput first (drills and furnaces are what a
-    /// widening bot actually converts into payout), luxuries with leftovers,
-    /// rerolling a few times while flush to fish.
+    /// Shop: fuel first (clean ore lots split across the bays), then more
+    /// furnaces, then whatever compounds. Dirty lots are poison without
+    /// filters; the bot knows its limits.
     fn shop(&self, g: &mut Game) {
-        const PREF: [MachineId; 5] = [
-            MachineId::Drill, MachineId::Furnace, MachineId::Heatsink,
-            MachineId::Polisher, MachineId::Overclock,
-        ];
+        let mut bay = 0;
+        let buy_fuel = |g: &mut Game, bay: &mut usize| loop {
+            let pick = g.lot_offers.iter().position(|l| {
+                l.entries.iter().any(|e| e.0 == ItemType::Ore)
+                    && !l.entries.iter().any(|e| e.0 == ItemType::Slag)
+                    && g.credits >= l.price + 10
+            });
+            match pick {
+                Some(i) => {
+                    if g.buy_lot(i, *bay).is_err() {
+                        break;
+                    }
+                    *bay = (*bay + 1) % g.bay_queues.len();
+                }
+                None => break,
+            }
+        };
+        // fuel first: an idle furnace bank earns nothing
+        buy_fuel(g, &mut bay);
+        // machines and compounding buys
         let mut rerolls = 0;
         loop {
             let mut bought = false;
-            for want in PREF {
+            if self.built < lanes().len() || g.hand.iter().any(|c| c.machine == MachineId::Furnace)
+            {
                 while let Some(i) = g
                     .offers
                     .iter()
-                    .position(|o| matches!(*o, Offer::Machine(c) if c.machine == want))
+                    .position(|o| matches!(*o, Offer::Machine(c) if c.machine == MachineId::Furnace))
                 {
-                    // keep a belt budget: a machine that can't be wired in is
-                    // dead weight on the board
-                    if g.credits < g.offer_price(g.offers[i]) + 12 || g.shop_buy(i).is_err() {
+                    if g.credits < g.offer_price(g.offers[i]) + 20 || g.shop_buy(i).is_err() {
                         break;
                     }
                     bought = true;
@@ -158,16 +179,18 @@ impl LaneBot {
             while let Some(i) = g.offers.iter().position(|o| {
                 matches!(
                     *o,
-                    Offer::Directive(DirectiveId::Flywheel | DirectiveId::Superheater)
+                    Offer::Directive(DirectiveId::Superheater | DirectiveId::Flywheel)
+                        | Offer::Contract(ContractId::BulkManifests | ContractId::NightShifts)
                 )
             }) {
-                if g.shop_buy(i).is_err() {
+                if g.credits < g.offer_price(g.offers[i]) + 30 || g.shop_buy(i).is_err() {
                     break;
                 }
                 bought = true;
             }
+            buy_fuel(g, &mut bay);
             if !bought {
-                if rerolls < 4 && g.credits > g.reroll_price() * 4 && g.shop_reroll().is_ok() {
+                if rerolls < 3 && g.credits > g.reroll_price() * 5 && g.shop_reroll().is_ok() {
                     rerolls += 1;
                     continue;
                 }
@@ -185,18 +208,18 @@ struct RunRecord {
     rounds_cleared: usize,
     total_delivered: i64,
     machines: usize,
-    /// Payout of each round attempted, in order.
-    payouts: Vec<i64>,
+    /// Total payout of each ROUND attempted (summed over its shifts).
+    round_payouts: Vec<i64>,
 }
 
 fn play_one(seed: u32) -> RunRecord {
     let mut g = Game::new(seed);
-    let mut bot = LaneBot::new();
+    let mut bot = DockBot::new();
     loop {
         match g.phase {
             GamePhase::Build => {
                 bot.build(&mut g);
-                g.run_shift().expect("bot placed something illegal");
+                g.run_shift().expect("bot made an illegal move");
             }
             GamePhase::Shop => {
                 bot.shop(&mut g);
@@ -204,12 +227,20 @@ fn play_one(seed: u32) -> RunRecord {
             GamePhase::Over { .. } => break,
         }
     }
+    // aggregate per-shift history into per-round payouts
+    let mut round_payouts: Vec<i64> = Vec::new();
+    for o in &g.history {
+        if round_payouts.len() <= o.round {
+            round_payouts.resize(o.round + 1, 0);
+        }
+        round_payouts[o.round] += o.result.payout;
+    }
     RunRecord {
         seed,
         rounds_cleared: g.history.iter().filter(|o| o.cleared).count(),
         total_delivered: g.history.iter().map(|o| o.result.payout).sum(),
         machines: g.board.len(),
-        payouts: g.history.iter().map(|o| o.result.payout).collect(),
+        round_payouts,
     }
 }
 
@@ -230,8 +261,7 @@ fn batch(runs: u32, seed0: u32, jsonl: Option<&str>) {
         eprintln!("wrote {} records to {path}", records.len());
     }
 
-    // Survival histogram: how many runs died at each round.
-    let mut died_at = [0u32; 13]; // index = rounds cleared; 12 = won
+    let mut died_at = [0u32; 13];
     for r in &records {
         died_at[r.rounds_cleared] += 1;
     }
@@ -240,7 +270,11 @@ fn batch(runs: u32, seed0: u32, jsonl: Option<&str>) {
     let median = sorted[sorted.len() / 2];
     let mean = sorted.iter().sum::<usize>() as f64 / sorted.len() as f64;
 
-    println!("LaneBot × {runs} runs ({:.2}s, {:.1} runs/sec)", dt.as_secs_f64(), runs as f64 / dt.as_secs_f64());
+    println!(
+        "DockBot × {runs} runs ({:.2}s, {:.1} runs/sec)",
+        dt.as_secs_f64(),
+        runs as f64 / dt.as_secs_f64()
+    );
     println!("rounds cleared: median {median}, mean {mean:.2}");
     println!();
     println!("  cleared │ runs   │ quota that killed them");
@@ -254,15 +288,13 @@ fn batch(runs: u32, seed0: u32, jsonl: Option<&str>) {
         println!("  {i:>7} │ {n:>6} │ {quota:>8}  {bar}");
     }
 
-    // The overshoot instrument: what the bot actually delivers each round
-    // versus what the quota demands. Ratios well above ~1.3 mean the round
-    // is printing free money; the quota curve should be refit from this.
+    // The overshoot instrument: round payout (all shifts) vs quota.
     println!();
     println!("  round │ reached │ mean payout │ quota │ ratio");
     println!("  ──────┼─────────┼─────────────┼───────┼──────");
     for (r, &quota) in QUOTAS.iter().enumerate() {
         let pays: Vec<i64> =
-            records.iter().filter_map(|rec| rec.payouts.get(r).copied()).collect();
+            records.iter().filter_map(|rec| rec.round_payouts.get(r).copied()).collect();
         if pays.is_empty() {
             break;
         }

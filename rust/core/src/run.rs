@@ -6,19 +6,23 @@
 //! applies them.
 
 use crate::cards::{default_unlocked, shop_rack, starting_hand, Card, Offer};
-use crate::defs::{def, Dir, DirectiveId, ItemType, MachineId, Tag, ITEM_TYPES, QUALITY_CAP, TAGS};
+use crate::defs::{
+    def, ContractId, Dir, DirectiveId, ItemType, MachineId, Tag, ITEM_TYPES, QUALITY_CAP, TAGS,
+};
 use crate::rng::Rng;
-use crate::sim::{FilterCfg, Placement, ShiftResult, Sim};
+use crate::sim::{FilterCfg, Placement, SeedItem, ShiftResult, Sim};
 
 pub const BOARD_W: i32 = 18;
 pub const BOARD_H: i32 = 18;
-/// Refit 2026-08-10 against the compact-building LaneBot's measured payout
-/// curve (112, 137, 151, 167, 234, 278 by round). Shape: ~0.75× of widening
-/// capacity at round 1, tightening to ~1.05× by round 4, permanently above
-/// pure widening from round 5 — multipliers, markets and doctrines carry
-/// from there. Steps ~1.25–1.45×. The previous hand-authored curve measured
-/// 2.2× free money at round 1 and a 0.48× cliff at round 4.
-pub const QUOTAS: [i64; 12] = [85, 115, 145, 180, 260, 380, 550, 800, 1150, 1650, 2400, 3400];
+/// Placeholder pending re-measurement under the consignment model; the lab
+/// refits this after every economy change.
+pub const QUOTAS: [i64; 12] = [130, 175, 235, 310, 410, 540, 700, 900, 1170, 1500, 1930, 2500];
+
+/// A round is played in shifts: deliveries sum toward the quota, the factory
+/// stays warm in between, and clearing early converts spare shifts to bonus
+/// credits.
+pub const SHIFTS_PER_ROUND: u32 = 3;
+pub const SHIFT_TICKS: u32 = 40;
 /// Blueprints the hand can hold. Buying past this is refused, and so is
 /// pulling a machine off the board when there's no room for its card.
 pub const HAND_MAX: usize = 10;
@@ -26,9 +30,9 @@ pub const HAND_MAX: usize = 10;
 pub const SHOP_SIZE: usize = 5;
 /// Base reroll price, before the round multiplier and escalation.
 pub const REROLL_BASE: u32 = 2;
-/// Enough to lay belts for BOTH starting lane kits — round 1's quota
-/// demands the whole kit, not half of it.
-pub const STARTING_CREDITS: u32 = 40;
+/// Enough to plumb the starting kit across the big board: trunk, two or
+/// three furnace lanes, and the spine to the vault.
+pub const STARTING_CREDITS: u32 = 75;
 /// The spot market pays this multiple for the in-demand item.
 pub const MARKET_MULT: f64 = 2.0;
 /// Audit inspections slow the inspected tag to this fraction.
@@ -57,8 +61,66 @@ pub fn is_audit(round: usize) -> bool {
     AUDIT_ROUNDS.contains(&round)
 }
 
-pub fn shift_len(round: usize) -> u32 {
-    if round == 11 { 30 } else { 60 } // final audit halves the shift
+pub fn shift_len(_round: usize) -> u32 {
+    SHIFT_TICKS
+}
+
+/// One shipment on offer: what's inside, at what quality, for what price.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lot {
+    pub name: &'static str,
+    pub entries: Vec<(ItemType, u32)>,
+    pub quality: i32,
+    pub price: u32,
+}
+
+/// The shipment catalogue. Quantities scale with the round so late factories
+/// stay fed; contracts bias what arrives. Public so the lab and tests can
+/// sample the distribution directly.
+pub fn roll_lot(round: usize, contracts: &[ContractId], rng: &mut Rng) -> Lot {
+    let scale = 1.0 + round as f64 * 0.5;
+    let q = |n: u32| (n as f64 * scale).round() as u32;
+    let mut lot = match rng.below(6) {
+        0 => Lot { name: "Bulk Ore", entries: vec![(ItemType::Ore, q(60))], quality: 0, price: 0 },
+        1 => Lot {
+            name: "Dirty Ore",
+            entries: vec![(ItemType::Ore, q(80)), (ItemType::Slag, q(20))],
+            quality: 0,
+            price: 0,
+        },
+        2 => Lot { name: "Fresh Sap", entries: vec![(ItemType::Sap, q(40))], quality: 2, price: 0 },
+        3 => Lot { name: "Crystal Case", entries: vec![(ItemType::Crystal, q(18))], quality: 2, price: 0 },
+        4 => Lot {
+            name: "Mixed Manifest",
+            entries: vec![(ItemType::Ore, q(35)), (ItemType::Sap, q(20))],
+            quality: 1,
+            price: 0,
+        },
+        _ => Lot { name: "Flux Drum", entries: vec![(ItemType::Flux, q(10))], quality: 0, price: 0 },
+    };
+    if contracts.contains(&ContractId::TarSands) {
+        for e in lot.entries.iter_mut() {
+            if e.0 == ItemType::Ore {
+                let extra = (e.1 as f64 * 0.6) as u32;
+                e.1 += extra;
+                lot.entries.push((ItemType::Slag, (extra as f64 * 0.33) as u32));
+                break;
+            }
+        }
+    }
+    if contracts.contains(&ContractId::BulkManifests) {
+        for e in lot.entries.iter_mut() {
+            e.1 = (e.1 as f64 * 1.3).round() as u32;
+        }
+    }
+    // Price: ~35% of the raw value of the contents.
+    let raw: f64 = lot
+        .entries
+        .iter()
+        .map(|&(t, n)| crate::defs::item_value(t, lot.quality) * n as f64)
+        .sum();
+    lot.price = (raw * 0.35).round().max(1.0) as u32;
+    lot
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +152,19 @@ pub struct Game {
     pub offers: Vec<Offer>,
     /// Directives owned this run — permanent, stacking, never placed.
     pub directives: Vec<DirectiveId>,
+    /// Contracts owned this run — the joker layer, biasing input and output.
+    pub contracts: Vec<ContractId>,
+    /// Shipments on offer while the shop is open.
+    pub lot_offers: Vec<Lot>,
+    /// Each bay's queue: (type, count, quality) runs, streamed in order.
+    pub bay_queues: Vec<Vec<(ItemType, u32, i32)>>,
+    /// Items still on the board between shifts — the warm factory.
+    pub carry: Vec<SeedItem>,
+    /// Shifts spent on the current round, of [`SHIFTS_PER_ROUND`].
+    pub shifts_used: u32,
+    /// Deliveries banked toward the current quota across this round's shifts.
+    pub round_delivered: i64,
+    snapshot: Option<Snapshot>,
     /// The spot market for the round being (or about to be) built: this item
     /// pays [`MARKET_MULT`] × at the vault. Rolled when the shop opens, so
     /// purchases can chase it.
@@ -105,11 +180,30 @@ pub struct Game {
     seed: u32,
 }
 
+/// Everything a retry rewinds: the state of the world at round start.
+#[derive(Clone)]
+struct Snapshot {
+    credits: u32,
+    board: Vec<Placement>,
+    hand: Vec<Card>,
+    bay_queues: Vec<Vec<(ItemType, u32, i32)>>,
+    carry: Vec<SeedItem>,
+}
+
 impl Game {
     pub fn new(seed: u32) -> Game {
         let rng = Rng::new(seed);
-        // The Vault starts bolted to the east edge, mid-board.
-        let board = vec![Placement::new(BOARD_W - 1, BOARD_H / 2, MachineId::Vault, None)];
+        // Vault east, two loading bays west: flow has a direction.
+        let board = vec![
+            Placement::new(BOARD_W - 1, BOARD_H / 2, MachineId::Vault, None),
+            Placement::new(0, BOARD_H / 2 - 3, MachineId::Bay, Some(Dir::E)),
+            Placement::new(0, BOARD_H / 2 + 3, MachineId::Bay, Some(Dir::E)),
+        ];
+        // Head office sends a starter consignment, split across the docks.
+        let bay_queues = vec![
+            vec![(ItemType::Ore, 70, 0)],
+            vec![(ItemType::Ore, 50, 0)],
+        ];
         let mut g = Game {
             round: 0,
             credits: STARTING_CREDITS,
@@ -118,6 +212,13 @@ impl Game {
             hand: starting_hand(),
             offers: Vec::new(),
             directives: Vec::new(),
+            contracts: Vec::new(),
+            lot_offers: Vec::new(),
+            bay_queues,
+            carry: Vec::new(),
+            shifts_used: 0,
+            round_delivered: 0,
+            snapshot: None,
             market: ItemType::Ore, // rolled properly just below
             audit_tag: None,
             unlocked: default_unlocked(),
@@ -127,7 +228,23 @@ impl Game {
             seed,
         };
         g.roll_conditions(0);
+        g.take_snapshot();
         g
+    }
+
+    /// The bays, in board order — queue index i belongs to the i-th bay.
+    pub fn bays(&self) -> Vec<(i32, i32)> {
+        self.board.iter().filter(|p| p.m == MachineId::Bay).map(|p| (p.x, p.y)).collect()
+    }
+
+    fn take_snapshot(&mut self) {
+        self.snapshot = Some(Snapshot {
+            credits: self.credits,
+            board: self.board.clone(),
+            hand: self.hand.clone(),
+            bay_queues: self.bay_queues.clone(),
+            carry: self.carry.clone(),
+        });
     }
 
     /// Roll the round's chance elements: what the market wants, and (on audit
@@ -203,6 +320,11 @@ impl Game {
         self.buy_infra(x, y, MachineId::Splitter, Some(d), Some(d.turn_cw()))
     }
 
+    /// Place a scrap chute — swallows anything, pays nothing. Slag disposal.
+    pub fn buy_chute(&mut self, x: i32, y: i32) -> Result<(), String> {
+        self.buy_infra(x, y, MachineId::Chute, None, None)
+    }
+
     /// Play a blueprint from the hand: place its machine. Free — the card
     /// was paid for at the shop.
     pub fn play_card(
@@ -238,7 +360,9 @@ impl Game {
         let i = self
             .board
             .iter()
-            .position(|p| p.x == x && p.y == y && p.m != MachineId::Vault)
+            .position(|p| {
+                p.x == x && p.y == y && !matches!(p.m, MachineId::Vault | MachineId::Bay)
+            })
             .ok_or("nothing sellable there")?;
         let m = self.board[i].m;
         if matches!(m, MachineId::Belt | MachineId::Junction | MachineId::Merger | MachineId::Splitter) {
@@ -272,7 +396,7 @@ impl Game {
         }
         self.board
             .iter_mut()
-            .find(|p| p.x == x && p.y == y && p.m != MachineId::Vault)
+            .find(|p| p.x == x && p.y == y && !matches!(p.m, MachineId::Vault | MachineId::Bay))
             .ok_or_else(|| format!("nothing editable at {x},{y}"))
     }
 
@@ -298,6 +422,18 @@ impl Game {
             }
             None => Err("machine has no secondary edge".into()),
         }
+    }
+
+    /// Set (or clear) a Filter's item-type gate — the sorting-spine primitive.
+    pub fn set_filter_type(&mut self, x: i32, y: i32, ty: Option<ItemType>) -> Result<(), String> {
+        let p = self.board_mut(x, y)?;
+        if p.m != MachineId::Filter {
+            return Err("not a filter".into());
+        }
+        let mut cfg = p.cfg.unwrap_or_default();
+        cfg.item_type = ty;
+        p.cfg = Some(cfg);
+        Ok(())
     }
 
     /// Set a Filter's quality gate.
@@ -327,7 +463,9 @@ impl Game {
             .board
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.m != MachineId::Vault && tiles.contains(&(p.x, p.y)))
+            .filter(|(_, p)| {
+                !matches!(p.m, MachineId::Vault | MachineId::Bay) && tiles.contains(&(p.x, p.y))
+            })
             .map(|(i, _)| i)
             .collect();
         if moving.is_empty() {
@@ -354,13 +492,39 @@ impl Game {
         Ok(())
     }
 
-    /// The shift as a steppable sim — same board, seed, directives, market
-    /// and audit as `run_shift`, so a renderer can animate tick by tick and
-    /// the committed result is guaranteed identical.
+    /// How long this run's shifts are (contracts can stretch them).
+    pub fn shift_ticks(&self) -> u32 {
+        SHIFT_TICKS + if self.contracts.contains(&ContractId::NightShifts) { 8 } else { 0 }
+    }
+
+    /// The shift as a steppable sim — same board, seed, carry, queues,
+    /// directives, contracts, market and audit as `run_shift`, so a renderer
+    /// can animate tick by tick and the committed result is identical.
     pub fn shift_sim(&self) -> Result<Sim, String> {
         let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
+        // the warm factory: whatever was in the pipes is still in the pipes
+        sim.seed_items(&self.carry);
+        // bay queues stream from the docks, in order
+        for ((x, y), queue) in self.bays().into_iter().zip(&self.bay_queues) {
+            let mut seeds = Vec::new();
+            for &(ty, count, quality) in queue {
+                for _ in 0..count {
+                    seeds.push(SeedItem { x, y, buffered: true, ty, quality });
+                }
+            }
+            sim.seed_items(&seeds);
+        }
         sim.apply_directives(&self.directives);
         sim.set_demand(self.market, MARKET_MULT);
+        if self.contracts.contains(&ContractId::GearSyndicate) {
+            sim.set_demand(ItemType::Gear, 1.5);
+        }
+        sim.purist = self.contracts.contains(&ContractId::PuristClause);
+        sim.sap_decay = !self.contracts.contains(&ContractId::SweetTooth);
+        sim.crystal_crack = !self.contracts.contains(&ContractId::GentleHands);
+        if self.contracts.contains(&ContractId::FluxInjector) {
+            sim.flux_bonus = 3;
+        }
         if let Some(tag) = self.audit_tag {
             sim.apply_tag_speed(tag, AUDIT_SPEED_PENALTY);
         }
@@ -377,47 +541,110 @@ impl Game {
     fn shift_seed(&self) -> u32 {
         self.seed
             .wrapping_mul(0x9e37_79b9)
-            .wrapping_add(self.round as u32)
+            .wrapping_add((self.round as u32) * 8 + self.shifts_used)
     }
 
-    /// Run the shift for real and advance the round state machine.
+    /// Run ONE shift of the round. Deliveries bank toward the quota; the
+    /// board's material state carries into the next shift. The round ends
+    /// when the quota is met (spare shifts pay a bonus) or the shifts are
+    /// spent (the run ends, retry available).
     pub fn run_shift(&mut self) -> Result<&RoundOutcome, String> {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
         }
+        if self.shifts_used >= SHIFTS_PER_ROUND {
+            return Err("no shifts left this round".into());
+        }
         let mut sim = self.shift_sim()?;
-        let result = sim.run(shift_len(self.round));
+        let result = sim.run(self.shift_ticks());
+
+        // Capture the warm state: bay leftovers go back to their queues,
+        // everything else carries as loose material.
+        let bays = self.bays();
+        let mut carry = Vec::new();
+        for q in self.bay_queues.iter_mut() {
+            q.clear();
+        }
+        for seed in sim.export_state() {
+            match bays.iter().position(|&(bx, by)| (bx, by) == (seed.x, seed.y)) {
+                Some(b) if seed.buffered => {
+                    // compress runs of identical items back into queue form
+                    match self.bay_queues[b].last_mut() {
+                        Some(e) if e.0 == seed.ty && e.2 == seed.quality => e.1 += 1,
+                        _ => self.bay_queues[b].push((seed.ty, 1, seed.quality)),
+                    }
+                }
+                _ => carry.push(seed),
+            }
+        }
+        self.carry = carry;
+
+        self.shifts_used += 1;
+        self.round_delivered += result.payout;
         let quota = self.quota();
-        let cleared = result.payout >= quota;
+        let cleared = self.round_delivered >= quota;
         self.history.push(RoundOutcome { round: self.round, result, quota, cleared });
 
-        if !cleared {
-            self.phase = GamePhase::Over { won: false };
-        } else {
-            let surplus = (self.history.last().unwrap().result.payout - quota) as u32;
-            self.credits += surplus;
+        if cleared {
+            let surplus = (self.round_delivered - quota) as u32;
+            let spare = SHIFTS_PER_ROUND - self.shifts_used;
+            self.credits += surplus + spare * (quota as u32 / 10);
+            // round_delivered stays visible through the shop; shop_done resets
             if self.round + 1 >= QUOTAS.len() {
                 self.phase = GamePhase::Over { won: true };
             } else {
                 self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
+                self.lot_offers = (0..3)
+                    .map(|_| roll_lot(self.round + 1, &self.contracts, &mut self.rng))
+                    .collect();
                 self.rerolls = 0;
-                // Next round's conditions are known in the shop, so purchases
-                // can chase the market and brace for the inspection.
                 self.roll_conditions(self.round + 1);
                 self.phase = GamePhase::Shop;
             }
+        } else if self.shifts_used >= SHIFTS_PER_ROUND {
+            self.phase = GamePhase::Over { won: false };
         }
+        // else: still Build — rearrange and run the next shift
         Ok(self.history.last().unwrap())
     }
 
-    /// A missed quota isn't the end while you're iterating: rewind to the
-    /// build phase of the same round and try again. Board, hand, credits and
-    /// directives are exactly as you left them.
+    /// A missed quota isn't the end while you're iterating: rewind the whole
+    /// round — board, hand, credits, queues, warm material — to how it stood
+    /// when the round began, and try again.
     pub fn retry_round(&mut self) -> Result<(), String> {
         if self.phase != (GamePhase::Over { won: false }) {
             return Err("nothing to retry".into());
         }
+        let snap = self.snapshot.clone().ok_or("no snapshot to restore")?;
+        self.credits = snap.credits;
+        self.board = snap.board;
+        self.hand = snap.hand;
+        self.bay_queues = snap.bay_queues;
+        self.carry = snap.carry;
+        self.shifts_used = 0;
+        self.round_delivered = 0;
         self.phase = GamePhase::Build;
+        Ok(())
+    }
+
+    /// Buy the shipment at `lot_idx`, queueing it at bay `bay_idx`. The bay
+    /// choice IS the input decision: what arrives where, in what order.
+    pub fn buy_lot(&mut self, lot_idx: usize, bay_idx: usize) -> Result<(), String> {
+        if self.phase != GamePhase::Shop {
+            return Err("the shop is closed".into());
+        }
+        let lot = self.lot_offers.get(lot_idx).ok_or("no such shipment")?.clone();
+        if bay_idx >= self.bay_queues.len() {
+            return Err("no such bay".into());
+        }
+        if self.credits < lot.price {
+            return Err("cannot afford that shipment".into());
+        }
+        self.credits -= lot.price;
+        self.lot_offers.remove(lot_idx);
+        for (ty, count) in lot.entries {
+            self.bay_queues[bay_idx].push((ty, count, lot.quality));
+        }
         Ok(())
     }
 
@@ -442,6 +669,7 @@ impl Game {
         match offer {
             Offer::Machine(c) => self.hand.push(c),
             Offer::Directive(d) => self.directives.push(d),
+            Offer::Contract(c) => self.contracts.push(c),
         }
         Ok(())
     }
@@ -458,6 +686,8 @@ impl Game {
         self.credits -= price;
         self.rerolls += 1;
         self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
+        self.lot_offers =
+            (0..3).map(|_| roll_lot(self.round + 1, &self.contracts, &mut self.rng)).collect();
         Ok(())
     }
 
@@ -467,8 +697,12 @@ impl Game {
             return Err("the shop is closed".into());
         }
         self.offers.clear();
+        self.lot_offers.clear();
         self.round += 1;
+        self.shifts_used = 0;
+        self.round_delivered = 0;
         self.phase = GamePhase::Build;
+        self.take_snapshot();
         Ok(())
     }
 }

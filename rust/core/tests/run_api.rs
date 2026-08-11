@@ -68,23 +68,28 @@ fn filter_gate_refuses_non_filters() {
 #[test]
 fn stepped_shift_sim_matches_the_committed_shift_exactly() {
     let mut g = Game::new(42);
-    let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
-    g.play_card(drill, 13, 9, Some(Dir::E), None, None).unwrap();
+    // furnace beside bay A, short line east then down the far column
     let furnace = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
-    g.play_card(furnace, 14, 9, Some(Dir::E), None, None).unwrap();
-    g.buy_belt(15, 9, Dir::E).unwrap();
+    g.play_card(furnace, 1, 6, Some(Dir::E), None, None).unwrap();
+    for x in 2..=15 {
+        g.buy_belt(x, 6, Dir::E).unwrap();
+    }
+    for y in [6, 7, 8] {
+        g.buy_belt(16, y, Dir::S).unwrap();
+    }
     g.buy_belt(16, 9, Dir::E).unwrap();
 
     // Animate: step the sim one tick at a time, as the renderer will.
     let mut animated = g.shift_sim().unwrap();
-    let ticks = shift_len(g.round);
+    let ticks = g.shift_ticks();
     for _ in 0..ticks {
         animated.step();
     }
     let seen = animated.result(ticks);
 
-    // Commit: the game re-runs the same board and seed internally.
+    // Commit: the game re-runs the same board, seed, queues and carry.
     let outcome = g.run_shift().unwrap();
+    assert!(seen.payout > 0, "the bay-fed line must actually deliver");
     assert_eq!(outcome.result.payout, seen.payout);
     assert_eq!(outcome.result.in_flight, seen.in_flight);
     assert_eq!(outcome.result.jam_ticks, seen.jam_ticks);
@@ -149,6 +154,5 @@ fn the_vault_stays_bolted_down() {
 fn audits_fall_on_rounds_4_8_and_12() {
     let audits: Vec<usize> = (0..12).filter(|&r| is_audit(r)).collect();
     assert_eq!(audits, vec![3, 7, 11]);
-    assert_eq!(shift_len(11), 30); // the final audit halves the shift
-    assert_eq!(shift_len(3), 60); // the others don't (yet — NOTES.md)
+    assert_eq!(shift_len(3), shift_len(0), "shifts are uniform now");
 }

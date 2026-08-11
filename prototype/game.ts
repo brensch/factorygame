@@ -14,11 +14,15 @@ type Dir = "N" | "E" | "S" | "W";
 interface Card { m: string; name: string; cost: number; kind: string }
 type ShopOffer =
   | { type: "machine"; m: string; name: string; price: number; kind: string }
-  | { type: "directive"; d: string; name: string; price: number; tag: string; blurb: string };
+  | { type: "directive"; d: string; name: string; price: number; tag: string; blurb: string }
+  | { type: "contract"; c: string; name: string; price: number; blurb: string };
 interface OwnedDirective { d: string; name: string; tag: string; n: number }
+interface OwnedContract { c: string; name: string }
+interface BayState { x: number; y: number; total: number; queue: { t: string; n: number; q: number }[] }
+interface LotOffer { name: string; price: number; q: number; entries: { t: string; n: number }[] }
 interface Pl {
   x: number; y: number; m: string; kind: string;
-  d: Dir | null; d2: Dir | null; minQ: number | null;
+  d: Dir | null; d2: Dir | null; minQ: number | null; tg: string | null;
 }
 interface Outcome {
   round: number; payout: number; quota: number;
@@ -29,6 +33,9 @@ interface State {
   audit: boolean; phase: "build" | "shop" | "over"; won: boolean;
   qualityCap: number; boardW: number; boardH: number;
   board: Pl[]; hand: Card[]; offers: ShopOffer[];
+  bays: BayState[]; lotOffers: LotOffer[];
+  contracts: OwnedContract[];
+  shiftsUsed: number; shiftsMax: number; roundDelivered: number; carry: number;
   directives: OwnedDirective[];
   handMax: number; rerollPrice: number; priceMult: number;
   market: string; marketMult: number; auditTag: string | null;
@@ -79,6 +86,9 @@ const core = wasm.instance.exports as {
   junction(x: number, y: number): number;
   merger(x: number, y: number, d: number): number;
   splitter(x: number, y: number, d: number): number;
+  chute(x: number, y: number): number;
+  buy_lot(i: number, bay: number): number;
+  set_type_gate(x: number, y: number, ty: number): number;
   retry(): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
   sell(x: number, y: number): number;
@@ -130,17 +140,18 @@ const SHORT: Record<string, string> = {
   lapidary: "LAP", compress: "CMP", fab: "FAB", circuit: "CIR", lens: "LNS",
   engine: "ENG", belt: "", merger: "MRG", splitter: "SPL", buffer: "BUF",
   filter: "FIL", overclock: "OCK", polisher: "POL", heatsink: "HSK",
-  dup: "DUP", vault: "VLT",
+  dup: "DUP", vault: "VLT", bay: "BAY", chute: "▽",
 };
 const ITEM_COLOR: Record<string, string> = {
   ore: "#f0a63a", sap: "#6fcf5f", crystal: "#7fd8ff",
   ingot: "#e8623c", resin: "#a8d86a", shard: "#5fa8f5",
   gear: "#8b7bf0", circuit: "#c58bf0", lens: "#f08ad0",
   engine: "#6fcf5f", core: "#ffe08a", beacon: "#9fe8ff",
+  flux: "#e8d86a", slag: "#4a4f57",
 };
 
 // ── client state: what the player is doing, never what the game is ───────────
-type Infra = "belt" | "junction" | "merger" | "splitter";
+type Infra = "belt" | "junction" | "merger" | "splitter" | "chute";
 type Tool = { kind: Infra } | { kind: "card"; idx: number };
 
 const TAG_COLOR: Record<string, string> = {
@@ -304,7 +315,33 @@ function draw() {
     const outs = outFlows.get(k) ?? [];
     const ins = inFlows.get(k) ?? [];
 
-    if (c.m === "junction") {
+    if (c.m === "bay") {
+      ctx.fillStyle = "#2b3542";
+      ctx.strokeStyle = "#8ea1b8";
+      ctx.lineWidth = 1.5;
+      rr(c.x * TILE + 2, c.y * TILE + 2, TILE - 4, TILE - 4, 6);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#e8eef6";
+      ctx.font = `700 ${Math.max(8, TILE * 0.2)}px ui-monospace,monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("BAY", cx, cy - TILE * 0.14);
+      const bay = G.bays.find((b) => b.x === c.x && b.y === c.y);
+      ctx.fillStyle = "#f0a63a";
+      ctx.font = `700 ${Math.max(7, TILE * 0.17)}px ui-monospace,monospace`;
+      ctx.fillText(String(bay?.total ?? 0), cx, cy + TILE * 0.18);
+      for (const f of outs) portOut(c.x, c.y, f.d, f.status, f.secondary);
+    } else if (c.m === "chute") {
+      ctx.fillStyle = "#12151b";
+      ctx.strokeStyle = "#3a4655";
+      ctx.lineWidth = 1.5;
+      rr(c.x * TILE + 4, c.y * TILE + 4, TILE - 8, TILE - 8, 8);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = "#5a6a7d";
+      ctx.font = `700 ${Math.max(9, TILE * 0.3)}px ui-monospace,monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("▽", cx, cy);
+      for (const f of ins) portIn(c.x, c.y, f.d);
+    } else if (c.m === "junction") {
       // the crossing: both axes drawn edge to edge, with a hub so it reads
       // as over/under rather than a merge
       ctx.strokeStyle = "#3a4655";
@@ -369,7 +406,8 @@ function draw() {
       if (c.m === "filter") {
         ctx.fillStyle = "#0b0e13";
         ctx.font = `700 ${Math.max(7, TILE * 0.16)}px ui-monospace,monospace`;
-        ctx.fillText("≥" + (c.minQ ?? "?"), cx, cy + TILE * 0.26);
+        const gate = c.tg ? c.tg.slice(0, 3).toUpperCase() : "≥" + (c.minQ ?? "?");
+        ctx.fillText(gate, cx, cy + TILE * 0.26);
       }
 
       // ports: where it emits (coloured by the connection's verdict) and
@@ -508,6 +546,7 @@ function placeAt(x: number, y: number, d: Dir) {
   if (ui.tool.kind === "junction") { cmd(core.junction(x, y)); return; }
   if (ui.tool.kind === "merger") { cmd(core.merger(x, y, DCODE[d])); return; }
   if (ui.tool.kind === "splitter") { cmd(core.splitter(x, y, DCODE[d])); return; }
+  if (ui.tool.kind === "chute") { cmd(core.chute(x, y)); return; }
   const card = G.hand[ui.tool.idx];
   if (!card) return;
   // Filters eject sideways by default; splitters split sideways. The core
@@ -537,6 +576,7 @@ function paintHand() {
   infra("junction", "Junct", "✚", 2);
   infra("merger", "Merge", "⇒", 4);
   infra("splitter", "Split", "⇉", 4);
+  infra("chute", "Chute", "▽", 2);
 
   // the hand: real cards in a centered fan, click to arm, drag to place
   const fan = document.getElementById("handFan")!;
@@ -739,11 +779,15 @@ function paintInspector() {
   const c = ui.selected ? at(ui.selected.x, ui.selected.y) : null;
   if (!c || (c.m !== "filter" && c.m !== "splitter")) { body.innerHTML = ""; return; }
   if (c.m === "filter") {
+    const typeGate = c.tg;
     body.innerHTML =
       `<div class="kv"><span>Eject at quality ≥</span><b>${c.minQ ?? "?"}</b></div>
        <div class="row">
          <button id="qDown">−</button><button id="qUp">+</button>
          <button id="dRot">↻ eject</button>
+       </div>
+       <div class="row" style="margin-top:5px">
+         <button id="tGate">type: ${typeGate ?? "any"}</button>
        </div>`;
     (document.getElementById("qUp") as HTMLElement).onclick =
       () => { cmd(core.set_gate(c.x, c.y, (c.minQ ?? 5) + 1)); paintAll(); };
@@ -751,6 +795,15 @@ function paintInspector() {
       () => { cmd(core.set_gate(c.x, c.y, (c.minQ ?? 5) - 1)); paintAll(); };
     (document.getElementById("dRot") as HTMLElement).onclick =
       () => { cmd(core.rotate2(c.x, c.y)); paintAll(); };
+    (document.getElementById("tGate") as HTMLElement).onclick = () => {
+      // cycle: any → slag → ore → sap → crystal → flux → any
+      const names = [null, "slag", "ore", "sap", "crystal", "flux"];
+      const codes = [-1, 13, 0, 1, 2, 12];
+      const cur = names.indexOf(c.tg);
+      const next = codes[(cur + 1) % codes.length];
+      cmd(core.set_type_gate(c.x, c.y, next));
+      paintAll();
+    };
   } else {
     body.innerHTML = `<div class="kv"><span>Second output</span><b>${c.d2}</b></div>
       <div class="row"><button id="dRot">↻ 2nd output</button></div>`;
@@ -767,27 +820,20 @@ function meter(value: number) {
   bar.className = value >= G.quota ? "ok" : "short";
 }
 
-function project() {
-  const r = read<{ payout?: number; inFlight?: number; jamTicks?: number; err?: string }>(core.project());
-  if (r.err !== undefined) return;
-  meter(r.payout!);
-  const hints: string[] = [];
-  if (r.inFlight) hints.push(`⏳${r.inFlight}`);
-  if (r.jamTicks) hints.push(`⚠${r.jamTicks}`);
-  (document.getElementById("meterHints") as HTMLElement).textContent =
-    hints.length ? "· " + hints.join(" ") : "";
-}
-
 function paintHeader() {
   const g = (id: string) => document.getElementById(id) as HTMLElement;
   g("hRound").textContent = `${G.round + 1}/12`;
   g("hTick").textContent = ui.animating ? `t${ui.tick}` : "";
   g("hCred").textContent = String(G.credits);
   g("hQuota").textContent = G.quota.toLocaleString();
-  if (ui.animating) {
-    meter(ui.payout);
-    (document.getElementById("meterHints") as HTMLElement).textContent = "";
-  }
+  // The meter is what you've BANKED this round; during a shift it climbs
+  // live. There is no projection — you find out by running.
+  meter(G.roundDelivered + (ui.animating ? ui.payout : 0));
+  const pips = Array.from({ length: G.shiftsMax }, (_, i) =>
+    i < G.shiftsUsed + (ui.animating ? 1 : 0) ? "●" : "○").join("");
+  const hints: string[] = [pips];
+  if (G.carry > 0) hints.push(`⏳${G.carry}`);
+  (document.getElementById("meterHints") as HTMLElement).textContent = hints.join(" ");
   g("marketChip").innerHTML =
     `<span class="dot" style="background:${ITEM_COLOR[G.market] ?? "#fff"}"></span>` +
     `<b>${capName(G.market)}</b> ×${G.marketMult}`;
@@ -806,6 +852,8 @@ function paintDirectives() {
     .map((d) =>
       `<span class="dchip" style="border-color:${TAG_COLOR[d.tag]}88;color:${TAG_COLOR[d.tag]}"
         title="${d.name}">◆${d.n > 1 ? `×${d.n}` : ""}</span>`)
+    .join("") + G.contracts
+    .map((c) => `<span class="dchip" style="border-color:#e8c86a88;color:#e8c86a" title="${c.name}">★</span>`)
     .join("");
 }
 
@@ -815,7 +863,6 @@ function paintAll() {
   paintInfo();
   paintInspector();
   paintHeader();
-  if (G.phase === "build" && !ui.animating) project();
   draw();
 }
 
@@ -1026,6 +1073,7 @@ window.addEventListener("keydown", (e) => {
   if (e.key === "j" || e.key === "J") { ui.tool = { kind: "junction" }; paintAll(); }
   if (e.key === "m" || e.key === "M") { ui.tool = { kind: "merger" }; paintAll(); }
   if (e.key === "s" || e.key === "S") { ui.tool = { kind: "splitter" }; paintAll(); }
+  if (e.key === "c" || e.key === "C") { ui.tool = { kind: "chute" }; paintAll(); }
   if (e.key === " ") { e.preventDefault(); runShift(); }
   const n = parseInt(e.key, 10);
   if (n >= 1 && n <= 9 && G.hand[n - 1]) {
@@ -1099,7 +1147,32 @@ function endShift() {
   cmd(core.shift_finish());
   if (G.phase === "shop") openShop();
   else if (G.phase === "over") G.won ? victory() : gameOver();
+  else shiftReport();
   paintAll();
+}
+
+/** Mid-round: the shift banked something, more shifts remain. */
+function shiftReport() {
+  const o = G.last!;
+  const left = G.shiftsMax - G.shiftsUsed;
+  modal(
+    `<h3>Shift ${G.shiftsUsed}/${G.shiftsMax}</h3>
+     <div class="big" style="color:${G.roundDelivered >= G.quota ? "var(--vault)" : "var(--extractor)"}">
+       ${G.roundDelivered.toLocaleString()}
+       <span style="font-size:15px;color:var(--ink-muted)">/ ${G.quota.toLocaleString()}
+       · +${o.payout.toLocaleString()} this shift</span></div>
+     <div class="stripe">
+       <span class="chip"><i>LEFT</i> <b>${"●".repeat(left)}${"○".repeat(G.shiftsUsed)}</b></span>
+       <span class="chip"><i>PIPES</i> <b>⏳${G.carry}</b></span>
+       <span class="chip gold">◈ <b>${G.credits}</b></span>
+     </div>
+     <p style="font-size:12.5px">Rearrange anything, then run again — the factory stays warm.</p>
+     <button class="go" id="continue" style="width:100%">Back to the floor</button>`,
+  );
+  (document.getElementById("continue") as HTMLElement).onclick = () => {
+    closeModal();
+    paintAll();
+  };
 }
 
 // ── modals ───────────────────────────────────────────────────────────────────
@@ -1114,10 +1187,10 @@ function openShop() {
   const o = G.last!;
   const full = G.hand.length >= G.handMax;
   modal(
-    `<h3>Shift cleared</h3>
-     <div class="big" style="color:var(--vault)">${o.payout.toLocaleString()}
+    `<h3>Round ${G.round + 1} cleared</h3>
+     <div class="big" style="color:var(--vault)">${G.roundDelivered.toLocaleString()}
        <span style="font-size:15px;color:var(--ink-muted)">/ ${o.quota.toLocaleString()}${
-         o.inFlight ? ` · ⏳${o.inFlight} forfeit` : ""}</span></div>
+         G.carry ? ` · ⏳${G.carry} in the pipes` : ""}</span></div>
      <div class="stripe">
        <span class="chip gold">◈ <b>${G.credits}</b></span>
        <span class="chip"><i>NEXT</i> <b>${(G.nextQuota ?? 0).toLocaleString()}</b></span>
@@ -1137,12 +1210,35 @@ function openShop() {
            <div class="ds">${o.tag.toUpperCase()} doctrine · permanent</div>
            <div class="pr">◈ ${o.price}</div></div>`;
        }
+       if (o.type === "contract") {
+         const afford = G.credits >= o.price;
+         return `<div class="off dir${afford ? "" : " no"}" data-i="${i}"
+             style="border-color:#e8c86a88" title="${o.blurb}">
+           <div class="sw" style="background:#e8c86a">★</div>
+           <div class="nm">${o.name}</div>
+           <div class="ds">contract · permanent</div>
+           <div class="pr">◈ ${o.price}</div></div>`;
+       }
        const afford = G.credits >= o.price && !full;
        return `<div class="off${afford ? "" : " no"}" data-i="${i}" title="${MDEF.get(o.m)?.blurb ?? ""}">
          <div class="sw" style="background:${CAT[o.kind]}">${SHORT[o.m] || "▸"}</div>
          <div class="nm">${o.name}</div>
          <div class="ds">${mechShort(o.m)}</div>
          <div class="pr">◈ ${o.price}</div></div>`;
+     }).join("")}</div>
+     <div class="offers" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">${G.lotOffers.map((l, i) => {
+       const afford = G.credits >= l.price;
+       const contents = l.entries
+         .map((e) => `<span class="ichip"><i style="background:${ITEM_COLOR[e.t] ?? "#fff"}"></i>${e.n}× ${capName(e.t)}</span>`)
+         .join(" + ");
+       return `<div class="off lot${afford ? "" : " no"}" data-lot="${i}">
+         <div class="nm">📦 ${l.name}${l.q ? ` <span style="color:var(--ink-muted)">q${l.q}</span>` : ""}</div>
+         <div class="ds">${contents}</div>
+         <div class="pr">◈ ${l.price}</div>
+         <div class="row" style="margin-top:6px">
+           <button data-lot-buy="${i}" data-bay="0"${afford ? "" : " disabled"}>→ Bay A</button>
+           <button data-lot-buy="${i}" data-bay="1"${afford ? "" : " disabled"}>→ Bay B</button>
+         </div></div>`;
      }).join("")}</div>
      <div class="row">
        <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>↻ Reroll ◈${G.rerollPrice}</button>
@@ -1154,6 +1250,13 @@ function openShop() {
     el.onclick = () => {
       if (cmd(core.shop_buy(+el.dataset.i!))) paintAll();
       openShop(); // re-render the rack either way
+    };
+  });
+  document.querySelectorAll<HTMLElement>("[data-lot-buy]").forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      if (cmd(core.buy_lot(+el.dataset.lotBuy!, +el.dataset.bay!))) paintAll();
+      openShop();
     };
   });
   (document.getElementById("reroll") as HTMLElement).onclick = () => {
@@ -1231,11 +1334,14 @@ paintAll();
 
 modal(
   `<h3>OVERFLOW</h3>
-   <p><b>Beat the quota.</b> Route items into the
-      <b style="color:var(--vault)">Vault</b>; the meter up top runs the whole shift
-      before you commit. Surplus is yours — the shop between rounds sells more
-      blueprints, and blueprints are forever: place, move, reclaim, free.</p>
-   <p>First line: <b>Drill</b> ▸▸▸ <b>Furnace</b> ▸▸▸ Vault.
+   <p><b>Process what arrives. Beat the quota.</b> Your materials stream in from the
+      <b>loading bays</b> on the west wall — head office has already sent your first
+      ore consignment. Wire the bays through <b>Furnaces</b> to the
+      <b style="color:var(--vault)">Vault</b>. You get <b>${G.shiftsMax} shifts</b> a
+      round; deliveries add up, the factory stays warm in between, spare shifts pay
+      a bonus. No forecasts — run it and find out.</p>
+   <p>Between rounds the shop sells machines, <b>shipments</b> (you choose which bay
+      they queue at), doctrines and <b style="color:#e8c86a">contracts</b>.
       Press <b>?</b> for controls.</p>
    <button class="go row" id="start" style="width:100%">▶ Shift 1</button>`,
 );

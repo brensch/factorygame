@@ -16,7 +16,10 @@
 //!
 //! Open design questions live in NOTES.md; this module is the mechanism.
 
-use crate::defs::{def, directive, DirectiveId, MachineId, CARD_POOL, DIRECTIVE_POOL};
+use crate::defs::{
+    contract, def, directive, ContractId, DirectiveId, MachineId, CARD_POOL, CONTRACT_POOL,
+    DIRECTIVE_POOL,
+};
 use crate::rng::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +40,7 @@ impl Card {
 pub enum Offer {
     Machine(Card),
     Directive(DirectiveId),
+    Contract(ContractId),
 }
 
 impl Offer {
@@ -45,30 +49,32 @@ impl Offer {
         match self {
             Offer::Machine(c) => c.cost(),
             Offer::Directive(d) => directive(d).cost,
+            Offer::Contract(c) => contract(c).cost,
         }
     }
 }
 
-/// The Ferrous Dynamics starting kit: enough blueprints to build one smelting
-/// line twice over, so the first shift is buildable before any shop exists.
+/// The Ferrous Dynamics starting kit: processors for the starter ore
+/// consignment already waiting at the docks.
 pub fn starting_hand() -> Vec<Card> {
-    [MachineId::Drill, MachineId::Drill, MachineId::Furnace, MachineId::Furnace]
+    [MachineId::Furnace, MachineId::Furnace, MachineId::Furnace, MachineId::Fab]
         .into_iter()
         .map(|m| Card { machine: m })
         .collect()
 }
 
-/// One shop rack: `n - 1` distinct machine offers from the unlocked pool,
-/// plus one directive. The directive slot is the route-commitment lever —
-/// it competes with raw throughput for the same credits every single round.
+/// One shop rack: `n - 2` distinct machine offers from the unlocked pool,
+/// plus one directive and one contract. The last two slots compete with raw
+/// throughput for the same credits every single round.
 pub fn shop_rack(unlocked: &[MachineId], n: usize, rng: &mut Rng) -> Vec<Offer> {
     let mut pool: Vec<MachineId> = unlocked.to_vec();
     let mut out = Vec::with_capacity(n);
-    while out.len() + 1 < n && !pool.is_empty() {
+    while out.len() + 2 < n && !pool.is_empty() {
         let i = rng.below(pool.len());
         out.push(Offer::Machine(Card { machine: pool.swap_remove(i) }));
     }
     out.push(Offer::Directive(DIRECTIVE_POOL[rng.below(DIRECTIVE_POOL.len())]));
+    out.push(Offer::Contract(CONTRACT_POOL[rng.below(CONTRACT_POOL.len())]));
     out
 }
 

@@ -5,7 +5,7 @@
 use overflow_core::boards::*;
 use overflow_core::cards::Offer;
 use overflow_core::defs::{item_value, Dir, ItemType, MachineId, QUALITY_CAP};
-use overflow_core::run::{Game, GamePhase, HAND_MAX, QUOTAS, SHOP_SIZE};
+use overflow_core::run::{GamePhase, QUOTAS, SHOP_SIZE};
 use overflow_core::sim::{run_board, Placement, Sim};
 
 const SEED: u32 = 0xc0ffee;
@@ -189,85 +189,118 @@ fn junction_crosses_two_lanes_without_mixing() {
 
 // ── run structure: the hand and the shop ─────────────────────────────────────
 
-/// The whole starting kit, built compactly by the vault: two drill+furnace
-/// lanes sharing the spine into (17,9). ~112 payout at 60 ticks.
-fn build_starting_lanes(g: &mut Game) {
-    for (i, y) in [9, 8].into_iter().enumerate() {
-        let d = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
-        g.play_card(d, 13, y, Some(Dir::E), None, None).unwrap();
+use overflow_core::defs::{ContractId, DirectiveId};
+use overflow_core::rng::Rng;
+use overflow_core::run::{roll_lot, Game, SHIFTS_PER_ROUND};
+#[allow(unused_imports)]
+use overflow_core::run::HAND_MAX;
+
+/// The consignment starter build: a furnace beside each bay, a lane along
+/// the bay's row, and a shared spine into the vault at (17,9).
+fn build_starter(g: &mut Game) {
+    for (row, toward) in [(6, Dir::S), (12, Dir::N)] {
         let f = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
-        g.play_card(f, 14, y, Some(Dir::E), None, None).unwrap();
-        g.buy_belt(15, y, Dir::E).unwrap();
-        g.buy_belt(16, y, if i == 0 { Dir::E } else { Dir::S }).unwrap();
+        g.play_card(f, 1, row, Some(Dir::E), None, None).unwrap();
+        for x in 2..=15 {
+            g.buy_belt(x, row, Dir::E).unwrap();
+        }
+        g.buy_belt(16, row, toward).unwrap();
+        let range: Vec<i32> = if row < 9 { (row + 1..9).collect() } else { (10..row).rev().collect() };
+        for yy in range {
+            g.buy_belt(16, yy, toward).unwrap();
+        }
+    }
+    if !g.board.iter().any(|p| p.x == 16 && p.y == 9) {
+        g.buy_belt(16, 9, Dir::E).unwrap();
     }
 }
 
-
 #[test]
-fn a_full_scripted_round_1_clears_quota_and_opens_the_shop() {
+fn a_full_scripted_round_1_processes_the_starter_consignment() {
     let mut g = Game::new(42);
-    assert_eq!(g.credits, 40);
-    assert_eq!(g.hand.len(), 4); // 2 Drills + 2 Furnaces, the starting kit
+    assert_eq!(g.credits, 75);
+    assert_eq!(g.hand.len(), 4); // three furnaces and a fab
+    assert_eq!(g.bays().len(), 2);
+    let queued: u32 = g.bay_queues.iter().flatten().map(|e| e.1).sum();
+    assert_eq!(queued, 120, "the starter ore consignment waits at the docks");
 
-    build_starting_lanes(&mut g);
-    // placement is free (paid at the shop); only the 4 belts cost credits
-    assert_eq!(g.credits, 40 - 4);
+    build_starter(&mut g);
 
-    let projected = g.project().unwrap().payout;
-    assert!(projected >= QUOTAS[0], "projection {projected} should clear {}", QUOTAS[0]);
+    // shifts sum toward the quota; the factory stays warm in between
+    let mut shifts = 0;
+    while g.phase == GamePhase::Build {
+        g.run_shift().unwrap();
+        shifts += 1;
+        assert!(shifts <= SHIFTS_PER_ROUND);
+    }
+    assert_eq!(g.phase, GamePhase::Shop, "the starter build must clear round 1");
+    assert!(shifts >= 2, "one shift should NOT clear round 1 (got {shifts})");
 
-    let outcome = g.run_shift().unwrap();
-    assert!(outcome.cleared);
-    assert_eq!(g.phase, GamePhase::Shop);
+    // the shop: machines + a directive + a contract, and three shipments
     assert_eq!(g.offers.len(), SHOP_SIZE);
+    assert!(g.offers.iter().any(|o| matches!(o, Offer::Directive(_))));
+    assert!(g.offers.iter().any(|o| matches!(o, Offer::Contract(_))));
+    assert_eq!(g.lot_offers.len(), 3);
 
-    // buy a machine at its current (round-scaled) price, then leave
-    g.credits += 1_000; // affordability isn't under test; prices are
-    let credits_before = g.credits;
-    let idx = g.offers.iter().position(|o| matches!(o, Offer::Machine(_))).unwrap();
-    let price = g.offer_price(g.offers[idx]);
-    g.shop_buy(idx).unwrap();
-    assert_eq!(g.credits, credits_before - price);
-    assert_eq!(g.hand.len(), 1); // whole kit placed + the purchase
+    // buy a shipment to bay 0: queue grows, credits shrink
+    let price = g.lot_offers[0].price;
+    let before = g.credits;
+    g.buy_lot(0, 0).unwrap();
+    assert_eq!(g.credits, before - price);
+    assert!(!g.bay_queues[0].is_empty());
 
     g.shop_done().unwrap();
     assert_eq!(g.round, 1);
     assert_eq!(g.phase, GamePhase::Build);
-    assert_eq!(g.hand.len(), 1); // the hand persists between rounds
 }
 
 #[test]
-fn an_empty_board_ends_the_run() {
+fn an_idle_factory_burns_all_three_shifts_then_dies() {
     let mut g = Game::new(9);
-    let outcome = g.run_shift().unwrap();
-    assert!(!outcome.cleared);
+    for _ in 0..SHIFTS_PER_ROUND - 1 {
+        g.run_shift().unwrap();
+        assert_eq!(g.phase, GamePhase::Build, "shifts remain");
+    }
+    g.run_shift().unwrap();
     assert_eq!(g.phase, GamePhase::Over { won: false });
+    assert!(g.run_shift().is_err(), "no shifts left to run");
 }
 
 #[test]
-fn removing_a_machine_returns_its_blueprint_to_the_hand() {
-    let mut g = Game::new(5);
-    let n_before = g.hand.len();
-    let i = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
-    g.play_card(i, 0, 0, Some(Dir::E), None, None).unwrap();
-    assert_eq!(g.hand.len(), n_before - 1);
-    g.sell(0, 0).unwrap();
-    assert_eq!(g.hand.len(), n_before); // back in the hand, not a discard pile
-    assert!(g.hand.iter().filter(|c| c.machine == MachineId::Drill).count() == 2);
+fn retry_rewinds_the_whole_round() {
+    let mut g = Game::new(9);
+    let credits0 = g.credits;
+    let queue0 = g.bay_queues.clone();
+    g.buy_belt(5, 5, Dir::E).unwrap(); // spend something
+    for _ in 0..SHIFTS_PER_ROUND {
+        g.run_shift().unwrap();
+    }
+    assert_eq!(g.phase, GamePhase::Over { won: false });
+    g.retry_round().unwrap();
+    assert_eq!(g.phase, GamePhase::Build);
+    assert_eq!(g.credits, credits0, "spent credits come back");
+    assert_eq!(g.bay_queues, queue0, "queues rewound");
+    assert!(!g.board.iter().any(|p| p.x == 5 && p.y == 5), "the belt is gone");
 }
 
 #[test]
-fn belts_refund_credits_but_machines_do_not() {
-    let mut g = Game::new(5);
-    g.buy_belt(0, 0, Dir::E).unwrap();
-    let before = g.credits;
-    g.sell(0, 0).unwrap();
-    assert_eq!(g.credits, before + 1); // infrastructure refunds in credits
-    let i = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
-    g.play_card(i, 0, 0, Some(Dir::E), None, None).unwrap();
-    let before = g.credits;
-    g.sell(0, 0).unwrap();
-    assert_eq!(g.credits, before); // machines come back as blueprints instead
+fn the_factory_stays_warm_between_shifts() {
+    let mut g = Game::new(42);
+    build_starter(&mut g);
+    g.run_shift().unwrap();
+    assert!(!g.carry.is_empty(), "material still in the pipes after shift 1");
+    let queued: u32 = g.bay_queues.iter().flatten().map(|e| e.1).sum();
+    assert!(queued < 120, "the bays streamed some of their queues");
+    assert!(queued > 0, "40 ticks cannot drain 120 items from two bays");
+}
+
+#[test]
+fn bays_and_vault_are_bolted_down() {
+    let mut g = Game::new(1);
+    assert!(g.rotate(0, 6).is_err(), "bay");
+    assert!(g.sell(0, 6).is_err(), "bay");
+    assert!(g.move_by(&[(0, 6)], 1, 0).is_err(), "bay");
+    assert!(g.sell(17, 9).is_err(), "vault");
 }
 
 #[test]
@@ -276,95 +309,208 @@ fn selling_a_blueprint_recovers_half_its_current_price() {
     let i = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
     let before = g.credits;
     g.sell_blueprint(i).unwrap();
-    // round 0: mult = 115/35 ≈ 3.29 → furnace priced 16, sells for 8
-    assert_eq!(g.credits, before + 8);
-    assert_eq!(g.hand.len(), 3);
-}
-
-#[test]
-fn the_hand_caps_at_ten_blueprints() {
-    let mut g = Game::new(42);
-    build_starting_lanes(&mut g);
-    g.run_shift().unwrap();
-    g.credits = 100_000; // not testing affordability here
-    let machine_slot = |g: &Game| g.offers.iter().position(|o| matches!(o, Offer::Machine(_)));
-    while g.hand.len() < HAND_MAX {
-        match machine_slot(&g) {
-            Some(i) => g.shop_buy(i).unwrap(),
-            None => g.shop_reroll().unwrap(),
-        }
-    }
-    while machine_slot(&g).is_none() {
-        g.shop_reroll().unwrap();
-    }
-    let i = machine_slot(&g).unwrap();
-    assert!(g.shop_buy(i).is_err(), "buying a machine past the cap must be refused");
-    g.shop_done().unwrap();
-    // ...and pulling a machine off the board is refused too while full
-    assert!(g.sell(13, 9).is_err());
-    g.sell_blueprint(0).unwrap();
-    g.sell(13, 9).unwrap(); // room again
-}
-
-#[test]
-fn rerolls_escalate_within_a_shop() {
-    let mut g = Game::new(42);
-    build_starting_lanes(&mut g);
-    g.run_shift().unwrap();
-    let first = g.reroll_price();
-    let before = g.credits;
-    g.shop_reroll().unwrap();
-    assert_eq!(g.credits, before - first);
-    assert_eq!(g.offers.len(), SHOP_SIZE);
-    assert_eq!(g.reroll_price(), first * 2, "second reroll costs double");
+    // round 0: mult = 175/35 = 5 → furnace priced 25, sells for 12
+    assert_eq!(g.credits, before + 12);
 }
 
 #[test]
 fn shop_prices_track_the_quota_curve() {
     use overflow_core::run::priced;
-    // prices follow the quota curve everywhere
     assert_eq!(priced(3, 0), (3.0f64 * QUOTAS[1] as f64 / 35.0).round() as u32);
     assert_eq!(priced(3, 4), (3.0f64 * QUOTAS[5] as f64 / 35.0).round() as u32);
 }
 
 #[test]
 fn directives_buff_their_tag_and_stack() {
-    // A drill+furnace lane, then Flywheel (KINETIC): the drill speeds up.
     let line = || {
         let mut g = Game::new(42);
-        let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
-        g.play_card(drill, 13, 9, Some(Dir::E), None, None).unwrap();
-        let f = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
-        g.play_card(f, 14, 9, Some(Dir::E), None, None).unwrap();
-        g.buy_belt(15, 9, Dir::E).unwrap();
-        g.buy_belt(16, 9, Dir::E).unwrap();
+        build_starter(&mut g);
         g
     };
     let base = line().project().unwrap().payout;
-
     let mut g = line();
-    g.directives.push(overflow_core::defs::DirectiveId::Flywheel);
+    g.directives.push(DirectiveId::Superheater); // furnaces are HEAT
     let buffed = g.project().unwrap().payout;
-    assert!(buffed > base, "flywheel must speed the kinetic drill: {base} -> {buffed}");
-
-    g.directives.push(overflow_core::defs::DirectiveId::Flywheel);
-    let stacked = g.project().unwrap().payout;
-    assert!(stacked > buffed, "directives stack: {buffed} -> {stacked}");
-
-    // An off-tag directive does nothing for this board.
+    assert!(buffed > base, "superheater speeds the furnaces: {base} -> {buffed}");
+    g.directives.push(DirectiveId::Superheater);
+    assert!(g.project().unwrap().payout > buffed, "directives stack");
+    // an off-tag directive does nothing for this board
     let mut g = line();
-    g.directives.push(overflow_core::defs::DirectiveId::Enrichment);
+    g.directives.push(DirectiveId::Enrichment);
     assert_eq!(g.project().unwrap().payout, base);
 }
 
+// ── the consignment layer ────────────────────────────────────────────────────
+
 #[test]
-fn retry_rewinds_a_failed_round() {
-    let mut g = Game::new(9);
-    let outcome = g.run_shift().unwrap(); // empty board: instant failure
-    assert!(!outcome.cleared);
-    assert_eq!(g.phase, GamePhase::Over { won: false });
-    g.retry_round().unwrap();
-    assert_eq!(g.phase, GamePhase::Build);
-    assert_eq!(g.round, 0);
-    assert_eq!(g.hand.len(), 4, "hand untouched by the failed attempt");
+fn lots_scale_with_round_and_contracts_bias_them() {
+    let mut rng = Rng::new(7);
+    let early = roll_lot(0, &[], &mut rng);
+    let mut rng = Rng::new(7);
+    let late = roll_lot(6, &[], &mut rng);
+    assert_eq!(early.name, late.name, "same template under the same seed");
+    assert!(
+        late.entries[0].1 > early.entries[0].1 * 2,
+        "quantities scale with the round: {} -> {}",
+        early.entries[0].1,
+        late.entries[0].1
+    );
+
+    // Tar Sands: ore lots gain ore and pick up slag
+    let mut rng = Rng::new(1);
+    let mut clean = None;
+    let mut dirty = None;
+    for _ in 0..40 {
+        let l = roll_lot(0, &[], &mut rng);
+        if l.name == "Bulk Ore" {
+            clean = Some(l);
+            break;
+        }
+    }
+    let mut rng = Rng::new(1);
+    for _ in 0..40 {
+        let l = roll_lot(0, &[ContractId::TarSands], &mut rng);
+        if l.name == "Bulk Ore" {
+            dirty = Some(l);
+            break;
+        }
+    }
+    let (clean, dirty) = (clean.unwrap(), dirty.unwrap());
+    assert!(dirty.entries[0].1 > clean.entries[0].1, "more ore under Tar Sands");
+    assert!(
+        dirty.entries.iter().any(|e| e.0 == ItemType::Slag),
+        "…and slag mixed in: {dirty:?}"
+    );
+}
+
+#[test]
+fn sap_wilts_but_resin_does_not_and_sweet_tooth_stops_it() {
+    // a lone belt ring holds a sap item while ticks pass
+    let cells = vec![
+        Placement::new(0, 0, MachineId::Belt, Some(Dir::E)),
+        Placement::new(1, 0, MachineId::Belt, Some(Dir::W)),
+    ];
+    let wilted = {
+        let mut s = Sim::new(3, 3, &cells, 1).unwrap();
+        s.seed_items(&[overflow_core::sim::SeedItem { x: 0, y: 0, buffered: false, ty: ItemType::Sap, quality: 5 }]);
+        for _ in 0..40 {
+            s.step();
+        }
+        s.peek(0, 0).or(s.peek(1, 0)).unwrap().quality
+    };
+    assert!(wilted <= 1, "sap should wilt hard over 40 ticks: q{wilted}");
+
+    let kept = {
+        let mut s = Sim::new(3, 3, &cells, 1).unwrap();
+        s.sap_decay = false; // the Sweet Tooth contract
+        s.seed_items(&[overflow_core::sim::SeedItem { x: 0, y: 0, buffered: false, ty: ItemType::Sap, quality: 5 }]);
+        for _ in 0..40 {
+            s.step();
+        }
+        s.peek(0, 0).or(s.peek(1, 0)).unwrap().quality
+    };
+    assert_eq!(kept, 5);
+}
+
+#[test]
+fn crystal_cracks_in_junctions_unless_contracted() {
+    let cells = vec![
+        Placement::new(0, 1, MachineId::Belt, Some(Dir::E)),
+        Placement::new(1, 1, MachineId::Junction, None),
+        Placement::new(2, 1, MachineId::Belt, Some(Dir::E)),
+        Placement::new(3, 1, MachineId::Vault, None),
+    ];
+    let run = |crack: bool| {
+        let mut s = Sim::new(5, 3, &cells, 1).unwrap();
+        s.crystal_crack = crack;
+        s.seed_items(&[overflow_core::sim::SeedItem { x: 0, y: 1, buffered: false, ty: ItemType::Crystal, quality: 4 }]);
+        for _ in 0..10 {
+            s.step();
+        }
+        s.delivered[0].quality
+    };
+    assert_eq!(run(true), 3, "one junction pass, one quality point");
+    assert_eq!(run(false), 4, "Gentle Hands: no crack");
+}
+
+#[test]
+fn flux_catalyzes_a_batch() {
+    let cells = vec![
+        Placement::new(0, 0, MachineId::Furnace, Some(Dir::E)),
+        Placement::new(1, 0, MachineId::Vault, None),
+    ];
+    let run = |with_flux: bool, bonus: i32| {
+        let mut s = Sim::new(3, 3, &cells, 1).unwrap();
+        s.flux_bonus = bonus;
+        let mut seeds = vec![overflow_core::sim::SeedItem { x: 0, y: 0, buffered: true, ty: ItemType::Ore, quality: 0 }];
+        if with_flux {
+            seeds.push(overflow_core::sim::SeedItem { x: 0, y: 0, buffered: true, ty: ItemType::Flux, quality: 0 });
+        }
+        s.seed_items(&seeds);
+        for _ in 0..10 {
+            s.step();
+        }
+        s.delivered[0].quality
+    };
+    assert_eq!(run(false, 2), 0);
+    assert_eq!(run(true, 2), 2, "flux consumed for +2 quality");
+    assert_eq!(run(true, 3), 3, "Flux Injector: +3");
+}
+
+#[test]
+fn the_chute_swallows_and_pays_nothing() {
+    let cells = vec![
+        Placement::new(0, 0, MachineId::Belt, Some(Dir::E)),
+        Placement::new(1, 0, MachineId::Chute, None),
+    ];
+    let mut s = Sim::new(3, 3, &cells, 1).unwrap();
+    s.seed_items(&[overflow_core::sim::SeedItem { x: 0, y: 0, buffered: false, ty: ItemType::Slag, quality: 0 }]);
+    for _ in 0..5 {
+        s.step();
+    }
+    assert_eq!(s.items_in_flight(), 0, "swallowed");
+    assert!(s.delivered.is_empty(), "unpaid");
+}
+
+#[test]
+fn bays_stream_their_queue_in_order() {
+    let cells = vec![
+        Placement::new(0, 0, MachineId::Bay, Some(Dir::E)),
+        Placement::new(1, 0, MachineId::Belt, Some(Dir::E)),
+        Placement::new(2, 0, MachineId::Vault, None),
+    ];
+    let mut s = Sim::new(4, 3, &cells, 1).unwrap();
+    s.seed_items(&[
+        overflow_core::sim::SeedItem { x: 0, y: 0, buffered: true, ty: ItemType::Ore, quality: 0 },
+        overflow_core::sim::SeedItem { x: 0, y: 0, buffered: true, ty: ItemType::Flux, quality: 0 },
+    ]);
+    for _ in 0..10 {
+        s.step();
+    }
+    assert_eq!(s.delivered.len(), 2);
+    assert_eq!(s.delivered[0].ty, ItemType::Ore, "queue order preserved");
+    assert_eq!(s.delivered[1].ty, ItemType::Flux);
+}
+
+#[test]
+fn contract_value_hooks_pay_out() {
+    let cells = vec![
+        Placement::new(0, 0, MachineId::Belt, Some(Dir::E)),
+        Placement::new(1, 0, MachineId::Vault, None),
+    ];
+    let run = |gear_mult: Option<f64>, purist: bool, q: i32| {
+        let mut s = Sim::new(3, 3, &cells, 1).unwrap();
+        if let Some(m) = gear_mult {
+            s.set_demand(ItemType::Gear, m);
+        }
+        s.purist = purist;
+        s.seed_items(&[overflow_core::sim::SeedItem { x: 0, y: 0, buffered: false, ty: ItemType::Gear, quality: q }]);
+        for _ in 0..5 {
+            s.step();
+        }
+        s.delivered[0].value
+    };
+    assert_eq!(run(None, false, 0), 16.0);
+    assert_eq!(run(Some(1.5), false, 0), 24.0, "Gear Syndicate");
+    assert_eq!(run(None, true, 6), 16.0 * 2.5 * 1.5, "Purist on a q6 gear");
 }

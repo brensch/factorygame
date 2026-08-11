@@ -106,6 +106,39 @@ Fourth revision (v2.3) — tuning became a measured loop:
   1.32 → 0.93 declining.
 - **Board 18×18.** Hand is a real card fan now — drag a card onto a tile to place it.
 
+## The consignment model (2026-08-10, v3) — you choose what flows in
+
+The biggest redesign yet, from playtest direction: "change the input to each run…
+more like a delivery thing… stuff stays in the machines… jokers that bias inputs
+and outputs." Extractors are gone. The factory is a processor now.
+
+- **Loading bays** (2, west edge, bolted down) are the only material source. Each
+  streams its **queue** one item per tick. Buying a shipment means choosing which
+  bay it queues at — that's the entire manual-input surface.
+- **Shipments** are drafted in the shop (3 offers/round, quantities scale with the
+  round, priced ~35% of raw value). Points are **margin** now: value added over
+  the cost of what you fed in. Finite input also kills lane-widening structurally —
+  you can't process more than arrives.
+- **Warm factory**: nothing resets. Items in machines, on belts, mid-loop carry
+  across shifts AND rounds. "Stranded = forfeit" is gone; it's inventory in the pipes.
+- **Rounds are 3 shifts of 40 ticks**, deliveries summing to the quota; spare
+  shifts pay a bonus; failing all three offers a full-round retry (snapshot rewind).
+- **Fog**: the projection is gone from the UI. Build on judgment, run, find out.
+- **Item classes with behavior**: sap wilts (−1q per 10 ticks; refining stabilizes),
+  crystal cracks in mergers/splitters/junctions, **flux** catalyzes any recipe batch
+  (+2q, wired in as a second input — never hand-fed), **slag** contaminates cheap
+  lots and needs type-filters + the scrap **chute**. Filters gained their type gate.
+- **Contracts** — the joker layer, one on every shop rack: Tar Sands (+60% ore,
+  +slag), Bulk Manifests (+30% lot size), Sweet Tooth (no wilt), Gentle Hands
+  (no crack), Gear Syndicate (gears 1.5×), Purist Clause (q6+ pays 1.5×),
+  Flux Injector (+3), Night Shifts (+8 ticks). All applied through the same flat
+  per-tile/demand resolution as auras and the market.
+- **Measured** (DockBot, a naive splitter-fed furnace bank that avoids dirty lots):
+  quotas [130, 175, 235, 310, 410, 540, 700, 900, 1170, 1500, 1930, 2500] give
+  deaths spread over rounds 2–5, ratios 1.63 → 0.59 declining. The bot understates
+  human capacity (no market play, splitter head-of-line losses, sells its fab), so
+  felt difficulty is softer than the ratios suggest. First curve fit for feel, not final.
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

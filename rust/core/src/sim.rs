@@ -118,8 +118,28 @@ pub struct Sim {
     pub jam_ticks: u32,
     /// Moves that happened on the most recent `step()`. Cleared each tick.
     pub moves: Vec<Move>,
-    /// The spot market: one item type paying a multiple this shift.
-    demand: Option<(ItemType, f64)>,
+    /// Value multipliers at the vault, stacking: market demand, contracts.
+    demands: Vec<(ItemType, f64)>,
+    /// Deliveries at quality 6+ pay 1.5× (Purist Clause contract).
+    pub purist: bool,
+    /// Sap loses a quality point every 10 ticks unless contracted away.
+    pub sap_decay: bool,
+    /// Crystal loses a quality point in mergers/splitters/junctions.
+    pub crystal_crack: bool,
+    /// Quality a consumed flux adds to a batch.
+    pub flux_bonus: i32,
+}
+
+/// A snapshot of one item somewhere on the board — how factory state
+/// survives between shifts. `buffered` items sit inside a machine (or a
+/// bay's queue); the rest sit on output edges.
+#[derive(Clone, Copy, Debug)]
+pub struct SeedItem {
+    pub x: i32,
+    pub y: i32,
+    pub buffered: bool,
+    pub ty: ItemType,
+    pub quality: i32,
 }
 
 impl Sim {
@@ -150,7 +170,8 @@ impl Sim {
         let mut sim = Sim {
             w, h, tiles, rng: Rng::new(seed), next_id: 1,
             tick: 0, delivered: Vec::new(), jam_ticks: 0, moves: Vec::new(),
-            demand: None,
+            demands: Vec::new(), purist: false,
+            sap_decay: true, crystal_crack: true, flux_bonus: 2,
         };
         sim.apply_auras(placements);
         Ok(sim)
@@ -175,9 +196,50 @@ impl Sim {
         Item { id, ty, quality: quality.min(QUALITY_CAP) }
     }
 
-    /// The spot market: deliveries of `ty` pay `mult` × their value this shift.
+    /// Deliveries of `ty` pay `mult` × their value this shift. Stacks.
     pub fn set_demand(&mut self, ty: ItemType, mult: f64) {
-        self.demand = Some((ty, mult));
+        self.demands.push((ty, mult));
+    }
+
+    /// Place carried-over items back onto the board. Unknown tiles are
+    /// dropped silently (the machine was sold between shifts).
+    pub fn seed_items(&mut self, seeds: &[SeedItem]) {
+        for s in seeds {
+            if s.x < 0 || s.y < 0 || s.x >= self.w || s.y >= self.h {
+                continue;
+            }
+            let item = self.mk(s.ty, s.quality);
+            let i = self.idx(s.x, s.y);
+            let t = &mut self.tiles[i];
+            if t.def.is_none() {
+                continue;
+            }
+            if s.buffered {
+                t.inputs.push(item);
+            } else if t.out.is_none() {
+                t.out = Some(item);
+            } else {
+                t.inputs.push(item);
+            }
+        }
+    }
+
+    /// Everything material on the board, for carrying into the next shift.
+    pub fn export_state(&self) -> Vec<SeedItem> {
+        let mut out = Vec::new();
+        for (i, t) in self.tiles.iter().enumerate() {
+            if t.def.is_none() {
+                continue;
+            }
+            let (x, y) = (i as i32 % self.w, i as i32 / self.w);
+            if let Some(item) = t.out {
+                out.push(SeedItem { x, y, buffered: false, ty: item.ty, quality: item.quality });
+            }
+            for item in &t.inputs {
+                out.push(SeedItem { x, y, buffered: true, ty: item.ty, quality: item.quality });
+            }
+        }
+        out
     }
 
     /// A blanket work-rate change for every machine carrying `tag` — the
@@ -277,9 +339,14 @@ impl Sim {
         let Some(d) = t.def else { return false };
         match d.kind {
             Kind::Vault => true,
+            _ if d.id == MachineId::Chute => true,
             _ if d.transport => t.out.is_none(),
             _ => match &d.recipe {
                 Some(r) => {
+                    if item.ty == ItemType::Flux {
+                        // one catalyst may wait in the hopper
+                        return t.inputs.iter().filter(|x| x.ty == ItemType::Flux).count() < 1;
+                    }
                     let need = r.inputs.iter().filter(|&&x| x == item.ty).count();
                     if need == 0 {
                         return false;
@@ -287,7 +354,7 @@ impl Sim {
                     let have = t.inputs.iter().filter(|x| x.ty == item.ty).count();
                     have < need
                 }
-                None => false, // extractors and pure modifiers never accept
+                None => false, // bays and pure modifiers never accept
             },
         }
     }
@@ -296,11 +363,11 @@ impl Sim {
     fn could_accept(&self, i: usize, item: Item) -> bool {
         let t = &self.tiles[i];
         let Some(d) = t.def else { return false };
-        if d.kind == Kind::Vault || d.transport {
+        if d.kind == Kind::Vault || d.transport || d.id == MachineId::Chute {
             return true;
         }
         match &d.recipe {
-            Some(r) => r.inputs.contains(&item.ty),
+            Some(r) => item.ty == ItemType::Flux || r.inputs.contains(&item.ty),
             None => false,
         }
     }
@@ -316,17 +383,27 @@ impl Sim {
         match d.kind {
             Kind::Vault => {
                 let mut value = item_value(item.ty, item.quality);
-                if let Some((ty, mult)) = self.demand {
+                for &(ty, mult) in &self.demands {
                     if ty == item.ty {
                         value *= mult;
                     }
+                }
+                if self.purist && item.quality >= 6 {
+                    value *= 1.5;
                 }
                 self.delivered.push(Delivery {
                     tick: self.tick, ty: item.ty, quality: item.quality, value,
                 });
             }
+            _ if d.id == MachineId::Chute => {
+                // swallowed, unpaid, gone
+            }
             _ if d.transport => {
-                let q = (item.quality + self.tiles[i].q_bonus).min(QUALITY_CAP);
+                let cracked = self.crystal_crack
+                    && item.ty == ItemType::Crystal
+                    && matches!(d.id, MachineId::Merger | MachineId::Splitter | MachineId::Junction);
+                let q = (item.quality + self.tiles[i].q_bonus - if cracked { 1 } else { 0 })
+                    .clamp(0, QUALITY_CAP);
                 let placed = Item { id: item.id, ty: item.ty, quality: q };
                 self.tiles[i].out = Some(placed);
                 self.tiles[i].jdir = travel;
@@ -346,6 +423,15 @@ impl Sim {
     fn produce(&mut self) {
         for i in 0..self.tiles.len() {
             let Some(d) = self.tiles[i].def else { continue };
+
+            // The loading bay streams its queue, one item per tick.
+            if d.id == MachineId::Bay {
+                let t = &mut self.tiles[i];
+                if t.out.is_none() && !t.inputs.is_empty() {
+                    t.out = Some(t.inputs.remove(0));
+                }
+                continue;
+            }
 
             // Belt-like tiles with a queued duplicate release it when free.
             if d.transport {
@@ -396,9 +482,20 @@ impl Sim {
                         let k = t.inputs.iter().position(|x| x.ty == *need).unwrap();
                         consumed.push(t.inputs.remove(k));
                     }
+                    // A buffered flux catalyzes the batch: consumed for bonus quality.
+                    let flux = {
+                        let t = &mut self.tiles[i];
+                        match t.inputs.iter().position(|x| x.ty == ItemType::Flux) {
+                            Some(k) => {
+                                t.inputs.remove(k);
+                                self.flux_bonus
+                            }
+                            None => 0,
+                        }
+                    };
                     let mean_q = consumed.iter().map(|c| c.quality).sum::<i32>() as f64
                         / consumed.len() as f64;
-                    let q = mean_q.floor() as i32 + self.tiles[i].quality_out;
+                    let q = mean_q.floor() as i32 + self.tiles[i].quality_out + flux;
                     let item = self.mk(r.output, q);
                     self.tiles[i].out = Some(item);
                 }
@@ -567,6 +664,22 @@ impl Sim {
         self.moves.clear();
         self.produce();
         self.transfer();
+        // Sap wilts: every 10th tick, raw sap anywhere on the floor loses a
+        // quality point. Refining stabilizes it — speed is the skill.
+        if self.sap_decay && self.tick.is_multiple_of(10) {
+            for t in self.tiles.iter_mut() {
+                if let Some(item) = t.out.as_mut() {
+                    if item.ty == ItemType::Sap {
+                        item.quality = (item.quality - 1).max(0);
+                    }
+                }
+                for item in t.inputs.iter_mut() {
+                    if item.ty == ItemType::Sap {
+                        item.quality = (item.quality - 1).max(0);
+                    }
+                }
+            }
+        }
     }
 
     pub fn run(&mut self, ticks: u32) -> ShiftResult {

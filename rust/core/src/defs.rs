@@ -11,6 +11,11 @@ pub enum ItemType {
     Ingot, Resin, Shard,
     Gear, Circuit, Lens,
     Engine, Core, Beacon,
+    /// Catalyst: worthless to ship, but wired into any recipe machine it is
+    /// consumed with the batch for bonus quality.
+    Flux,
+    /// Contaminant: worthless, clogs machines, wants filtering into a chute.
+    Slag,
 }
 
 impl ItemType {
@@ -21,15 +26,18 @@ impl ItemType {
             Ingot | Resin | Shard => 4.0,
             Gear | Circuit | Lens => 16.0,
             Engine | Core | Beacon => 64.0,
+            Flux => 2.0,
+            Slag => 0.0,
         }
     }
 }
 
-pub const ITEM_TYPES: [ItemType; 12] = [
+pub const ITEM_TYPES: [ItemType; 14] = [
     ItemType::Ore, ItemType::Sap, ItemType::Crystal,
     ItemType::Ingot, ItemType::Resin, ItemType::Shard,
     ItemType::Gear, ItemType::Circuit, ItemType::Lens,
     ItemType::Engine, ItemType::Core, ItemType::Beacon,
+    ItemType::Flux, ItemType::Slag,
 ];
 
 pub const TAGS: [Tag; 5] = [Tag::Heat, Tag::Kinetic, Tag::Volt, Tag::Precision, Tag::Organic];
@@ -91,7 +99,7 @@ pub enum MachineId {
     Fab, CircuitBench, LensGrinder, EngineWorks,
     Belt, Junction, Merger, Splitter, Buffer, Filter,
     Overclock, Polisher, Heatsink, Dup,
-    Vault,
+    Vault, Bay, Chute,
 }
 
 pub struct Recipe {
@@ -217,8 +225,13 @@ pub fn def(id: MachineId) -> &'static MachineDef {
         M::Dup => &MachineDef { id: M::Dup, name: "Duplicator", kind: Kind::Modifier, cost: 20,
             tags: &[T::Volt], transport: true, ..BASE },
 
-        // ── vault ───────────────────────────────────────────────────────────
+        // ── vault, docks, disposal ──────────────────────────────────────────
         M::Vault => &MachineDef { id: M::Vault, name: "Vault", kind: Kind::Vault, cost: 0, ..BASE },
+        // The loading bay: streams its assigned shipment queue onto the board,
+        // one item per tick. The only source of material in the game.
+        M::Bay => &MachineDef { id: M::Bay, name: "Loading Bay", kind: Kind::Logistics, cost: 0, ..BASE },
+        // The scrap chute: swallows anything, pays nothing. Where slag goes.
+        M::Chute => &MachineDef { id: M::Chute, name: "Scrap Chute", kind: Kind::Logistics, cost: 2, ..BASE },
     }
 }
 
@@ -226,7 +239,6 @@ pub fn def(id: MachineId) -> &'static MachineDef {
 /// junctions, mergers, splitters — are infrastructure, always available and
 /// paid per tile; Vaults are part of the board.
 pub const CARD_POOL: &[MachineId] = &[
-    M::Drill, M::Tap, M::Geode,
     M::Furnace, M::Retort, M::Lapidary, M::Compress,
     M::Fab, M::CircuitBench, M::LensGrinder, M::EngineWorks,
     M::Buffer, M::Filter,
@@ -282,5 +294,50 @@ pub fn directive(id: DirectiveId) -> &'static DirectiveDef {
         D::Enrichment => &DirectiveDef { id: D::Enrichment, name: "Enrichment", tag: T::Organic,
             speed: 1.0, quality_out: 1, quality_transport: 0, cost: 15,
             blurb: "ORGANIC machines gain +1 output quality, permanently. Stacks. Sap runs rich." },
+    }
+}
+
+// ── contracts ────────────────────────────────────────────────────────────────
+// The joker layer: permanent run-wide deals that bias what comes in and what
+// it pays going out. Bought in the shop, never placed, visible all run.
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ContractId {
+    TarSands, BulkManifests, SweetTooth, GentleHands,
+    GearSyndicate, PuristClause, FluxInjector, NightShifts,
+}
+
+pub struct ContractDef {
+    pub id: ContractId,
+    pub name: &'static str,
+    pub cost: u32,
+    pub blurb: &'static str,
+}
+
+pub const CONTRACT_POOL: [ContractId; 8] = [
+    ContractId::TarSands, ContractId::BulkManifests, ContractId::SweetTooth,
+    ContractId::GentleHands, ContractId::GearSyndicate, ContractId::PuristClause,
+    ContractId::FluxInjector, ContractId::NightShifts,
+];
+
+pub fn contract(id: ContractId) -> &'static ContractDef {
+    use ContractId as C;
+    match id {
+        C::TarSands => &ContractDef { id: C::TarSands, name: "Tar Sands Deal", cost: 14,
+            blurb: "Every ore lot you buy carries +60% more ore — and +20% slag mixed in. Volume has a smell." },
+        C::BulkManifests => &ContractDef { id: C::BulkManifests, name: "Bulk Manifests", cost: 18,
+            blurb: "Every lot you buy is 30% larger. The paperwork rounds up." },
+        C::SweetTooth => &ContractDef { id: C::SweetTooth, name: "Sweet Tooth", cost: 12,
+            blurb: "Sap never wilts on your floor. Take your time." },
+        C::GentleHands => &ContractDef { id: C::GentleHands, name: "Gentle Hands", cost: 12,
+            blurb: "Crystal no longer cracks in mergers, splitters or junctions." },
+        C::GearSyndicate => &ContractDef { id: C::GearSyndicate, name: "Gear Syndicate", cost: 16,
+            blurb: "The syndicate pays 1.5× for every gear delivered. Permanently. No questions." },
+        C::PuristClause => &ContractDef { id: C::PuristClause, name: "Purist Clause", cost: 16,
+            blurb: "Deliveries at quality 6+ pay 1.5×. Craftsmanship, rewarded." },
+        C::FluxInjector => &ContractDef { id: C::FluxInjector, name: "Flux Injector", cost: 14,
+            blurb: "Flux catalyzes +3 quality per batch instead of +2." },
+        C::NightShifts => &ContractDef { id: C::NightShifts, name: "Night Shifts", cost: 18,
+            blurb: "Every shift runs 8 ticks longer. The union looks the other way." },
     }
 }

@@ -31,6 +31,7 @@ interface State {
   board: Pl[]; hand: Card[]; offers: ShopOffer[];
   directives: OwnedDirective[];
   handMax: number; rerollPrice: number; priceMult: number;
+  market: string; marketMult: number; auditTag: string | null;
   nextQuota: number | null; nextAudit: boolean;
   auras: { x: number; y: number }[];
   flows: Flow[];
@@ -533,17 +534,22 @@ function paintHand() {
     pal.appendChild(el);
   };
   infra("belt", "Belt", "▸", 1);
-  infra("junction", "Junction", "✚", 2);
-  infra("merger", "Merger", "⇒", 4);
-  infra("splitter", "Splitter", "⇉", 4);
+  infra("junction", "Junct", "✚", 2);
+  infra("merger", "Merge", "⇒", 4);
+  infra("splitter", "Split", "⇉", 4);
+
+  const div = document.createElement("div");
+  div.className = "divider";
+  pal.appendChild(div);
 
   G.hand.forEach((card, i) => {
     const el = document.createElement("div");
     const on = ui.tool.kind === "card" && ui.tool.idx === i;
     el.className = "pi" + (on ? " on" : "");
     el.innerHTML =
+      (i < 9 ? `<span class="key">${i + 1}</span>` : "") +
       `<div class="sw" style="background:${CAT[card.kind]}">${SHORT[card.m] || "▸"}</div>` +
-      `<div class="nm">${card.name}</div><div class="cs">owned</div>`;
+      `<div class="nm">${card.name}</div>`;
     el.onclick = () => { ui.tool = { kind: "card", idx: i }; ui.selected = null; paintAll(); };
     el.oncontextmenu = (e) => {
       e.preventDefault();
@@ -558,7 +564,7 @@ function paintHand() {
   });
 
   (document.getElementById("deckInfo") as HTMLElement).textContent =
-    `hand ${G.hand.length}/${G.handMax}`;
+    `${G.hand.length}/${G.handMax}`;
 }
 
 // ── the info panel: what a machine does, fed by the core's catalogue ─────────
@@ -658,31 +664,36 @@ function infoHTML(key: string): string {
 }
 
 function paintInfo() {
+  const box = document.getElementById("info")!;
   const title = document.getElementById("infoTitle")!;
   const body = document.getElementById("infoBody")!;
-  // Priority: a selected placed machine, else the selected card or tool.
+  // The panel earns its screen space only when something non-default is in
+  // hand: a selected machine, a card, or a non-belt tool.
+  const interesting = !!ui.selected || ui.tool.kind === "card" ||
+    (ui.tool.kind !== "belt" && G.phase === "build");
+  if (!interesting || ui.animating) {
+    box.classList.remove("on");
+    return;
+  }
   let key: string = ui.tool.kind === "card" ? (G.hand[ui.tool.idx]?.m ?? "belt") : ui.tool.kind;
   if (ui.selected) key = at(ui.selected.x, ui.selected.y)?.m ?? key;
   const m = MDEF.get(key);
-  title.innerHTML = m ? `${m.name} <span class="deckinfo">${m.cost}c · ${m.kind}</span>` : "—";
+  box.classList.add("on");
+  title.innerHTML = m ? `${m.name} <span class="sub">${m.cost}c · ${m.kind}</span>` : "—";
   body.innerHTML = infoHTML(key);
 }
 
 function paintInspector() {
-  const box = document.getElementById("insp")!;
   const body = document.getElementById("inspBody")!;
   const c = ui.selected ? at(ui.selected.x, ui.selected.y) : null;
-  if (!c || (c.m !== "filter" && c.m !== "splitter")) { box.classList.remove("on"); return; }
-  box.classList.add("on");
+  if (!c || (c.m !== "filter" && c.m !== "splitter")) { body.innerHTML = ""; return; }
   if (c.m === "filter") {
     body.innerHTML =
-      `<div class="kv"><span>Eject when quality ≥</span><b>${c.minQ ?? "?"}</b></div>
-       <div class="row" style="margin-top:8px">
-         <button id="qDown">− gate</button><button id="qUp">+ gate</button>
-         <button id="dRot">turn eject</button>
-       </div>
-       <div id="hint" style="margin-top:9px">Items below the gate carry on round the loop.
-         Higher gate = more laps = more value per item, but fewer items get out.</div>`;
+      `<div class="kv"><span>Eject at quality ≥</span><b>${c.minQ ?? "?"}</b></div>
+       <div class="row">
+         <button id="qDown">−</button><button id="qUp">+</button>
+         <button id="dRot">↻ eject</button>
+       </div>`;
     (document.getElementById("qUp") as HTMLElement).onclick =
       () => { cmd(core.set_gate(c.x, c.y, (c.minQ ?? 5) + 1)); paintAll(); };
     (document.getElementById("qDown") as HTMLElement).onclick =
@@ -691,45 +702,59 @@ function paintInspector() {
       () => { cmd(core.rotate2(c.x, c.y)); paintAll(); };
   } else {
     body.innerHTML = `<div class="kv"><span>Second output</span><b>${c.d2}</b></div>
-      <div class="row" style="margin-top:8px"><button id="dRot">turn 2nd output</button></div>`;
+      <div class="row"><button id="dRot">↻ 2nd output</button></div>`;
     (document.getElementById("dRot") as HTMLElement).onclick =
       () => { cmd(core.rotate2(c.x, c.y)); paintAll(); };
   }
 }
 
+/** The one number that matters: fill the quota meter with `value`. */
+function meter(value: number) {
+  (document.getElementById("pProj") as HTMLElement).textContent = value.toLocaleString();
+  const bar = document.getElementById("pBar") as HTMLElement;
+  bar.style.width = Math.min(100, (value / G.quota) * 100) + "%";
+  bar.className = value >= G.quota ? "ok" : "short";
+}
+
 function project() {
   const r = read<{ payout?: number; inFlight?: number; jamTicks?: number; err?: string }>(core.project());
   if (r.err !== undefined) return;
-  (document.getElementById("pProj") as HTMLElement).textContent = r.payout!.toLocaleString();
-  (document.getElementById("pQuota") as HTMLElement).textContent = G.quota.toLocaleString();
-  (document.getElementById("pFlight") as HTMLElement).textContent = String(r.inFlight);
-  (document.getElementById("pJam") as HTMLElement).textContent = String(r.jamTicks);
-  const bar = document.getElementById("pBar") as HTMLElement;
-  bar.style.width = Math.min(100, (r.payout! / G.quota) * 100) + "%";
-  bar.className = r.payout! >= G.quota ? "" : "short";
+  meter(r.payout!);
+  const hints: string[] = [];
+  if (r.inFlight) hints.push(`⏳${r.inFlight}`);
+  if (r.jamTicks) hints.push(`⚠${r.jamTicks}`);
+  (document.getElementById("meterHints") as HTMLElement).textContent =
+    hints.length ? "· " + hints.join(" ") : "";
 }
 
 function paintHeader() {
   const g = (id: string) => document.getElementById(id) as HTMLElement;
-  g("hRound").textContent = String(G.round + 1) + (G.audit ? " ⚠" : "");
-  g("hQuota").textContent = G.quota.toLocaleString();
+  g("hRound").textContent = `${G.round + 1}/12`;
+  g("hTick").textContent = ui.animating ? `t${ui.tick}` : "";
   g("hCred").textContent = String(G.credits);
-  g("hTick").textContent = `${ui.tick}/${G.shiftLen}`;
-  g("hPay").textContent = ui.payout.toLocaleString();
+  g("hQuota").textContent = G.quota.toLocaleString();
+  if (ui.animating) {
+    meter(ui.payout);
+    (document.getElementById("meterHints") as HTMLElement).textContent = "";
+  }
+  g("marketChip").innerHTML =
+    `<span class="dot" style="background:${ITEM_COLOR[G.market] ?? "#fff"}"></span>` +
+    `<b>${capName(G.market)}</b> ×${G.marketMult}`;
+  const au = g("auditChip");
+  if (G.auditTag) {
+    au.style.display = "";
+    au.textContent = `⚠ ${G.auditTag.toUpperCase()} −40%`;
+  } else {
+    au.style.display = "none";
+  }
 }
 
 function paintDirectives() {
-  const sec = document.getElementById("dirSec")!;
   const box = document.getElementById("dirList")!;
-  if (!G.directives.length) {
-    sec.style.display = "none";
-    return;
-  }
-  sec.style.display = "";
   box.innerHTML = G.directives
     .map((d) =>
-      `<span class="dchip" style="border-color:${TAG_COLOR[d.tag]}88;color:${TAG_COLOR[d.tag]}">
-        ◆ ${d.name}${d.n > 1 ? ` ×${d.n}` : ""}</span>`)
+      `<span class="dchip" style="border-color:${TAG_COLOR[d.tag]}88;color:${TAG_COLOR[d.tag]}"
+        title="${d.name}">◆${d.n > 1 ? `×${d.n}` : ""}</span>`)
     .join("");
 }
 
@@ -929,6 +954,7 @@ window.addEventListener("keydown", (e) => {
     ui.multiSel.clear();
     ui.selected = null;
     drag = null;
+    document.getElementById("helpOv")!.classList.remove("on");
     paintAll();
     return;
   }
@@ -1031,42 +1057,43 @@ function closeModal() { document.getElementById("modal")!.classList.remove("on")
 
 function openShop() {
   const o = G.last!;
-  const surplus = o.payout - o.quota;
   const full = G.hand.length >= G.handMax;
   modal(
-    `<h3>The shop</h3>
-     <p>Delivered <b style="color:var(--vault)">${o.payout.toLocaleString()}</b> against a quota of
-        ${o.quota.toLocaleString()} — surplus of ${surplus.toLocaleString()} banked.
-        ${o.inFlight ? `${o.inFlight} items stranded on belts were forfeit.` : ""}
-        <b>Round ${G.round + 2}</b> needs
-        <b style="color:var(--extractor)">${(G.nextQuota ?? 0).toLocaleString()}</b>${G.nextAudit
-          ? ` — an <b style="color:var(--processor)">AUDIT</b>.`
-          : "."}</p>
-     <div class="kv" style="margin-bottom:10px;gap:7px;justify-content:flex-start"><span>Credits</span>
-        <b style="color:var(--extractor)">${G.credits}</b>
-        <span style="margin-left:auto">Hand</span><b>${G.hand.length}/${G.handMax}</b></div>
+    `<h3>Shift cleared</h3>
+     <div class="big" style="color:var(--vault)">${o.payout.toLocaleString()}
+       <span style="font-size:15px;color:var(--ink-muted)">/ ${o.quota.toLocaleString()}${
+         o.inFlight ? ` · ⏳${o.inFlight} forfeit` : ""}</span></div>
+     <div class="stripe">
+       <span class="chip gold">◈ <b>${G.credits}</b></span>
+       <span class="chip"><i>NEXT</i> <b>${(G.nextQuota ?? 0).toLocaleString()}</b></span>
+       <span class="chip" title="the spot market next round">
+         <span class="dot" style="background:${ITEM_COLOR[G.market] ?? "#fff"}"></span>
+         <b>${capName(G.market)}</b> ×${G.marketMult}</span>
+       ${G.auditTag ? `<span class="chip warn">⚠ ${G.auditTag.toUpperCase()} −40%</span>` : ""}
+       <span class="chip"><i>HAND</i> <b>${G.hand.length}/${G.handMax}</b></span>
+     </div>
      <div class="offers">${G.offers.map((o, i) => {
        if (o.type === "directive") {
          const afford = G.credits >= o.price;
          return `<div class="off dir${afford ? "" : " no"}" data-i="${i}"
-             style="border-color:${TAG_COLOR[o.tag]}66">
+             style="border-color:${TAG_COLOR[o.tag]}66" title="${o.blurb}">
            <div class="sw" style="background:${TAG_COLOR[o.tag]}">◆</div>
            <div class="nm">${o.name}</div>
-           <div class="ds"><b>${o.price}c</b> · ${o.tag.toUpperCase()} doctrine</div>
-           <div class="bl">${o.blurb}</div></div>`;
+           <div class="ds">${o.tag.toUpperCase()} doctrine · permanent</div>
+           <div class="pr">◈ ${o.price}</div></div>`;
        }
        const afford = G.credits >= o.price && !full;
-       return `<div class="off${afford ? "" : " no"}" data-i="${i}">
+       return `<div class="off${afford ? "" : " no"}" data-i="${i}" title="${MDEF.get(o.m)?.blurb ?? ""}">
          <div class="sw" style="background:${CAT[o.kind]}">${SHORT[o.m] || "▸"}</div>
          <div class="nm">${o.name}</div>
-         <div class="ds"><b>${o.price}c</b> · ${mechShort(o.m)}</div>
-         <div class="bl">${MDEF.get(o.m)?.blurb ?? ""}</div></div>`;
+         <div class="ds">${mechShort(o.m)}</div>
+         <div class="pr">◈ ${o.price}</div></div>`;
      }).join("")}</div>
      <div class="row">
-       <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>Reroll rack — ${G.rerollPrice}c</button>
-       <button class="go" id="shopDone">Start round ${G.round + 2}</button>
+       <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>↻ Reroll ◈${G.rerollPrice}</button>
+       <button class="go" id="shopDone">▶ Round ${G.round + 2}</button>
      </div>
-     ${full ? `<p style="margin:10px 0 0;font-size:12px">Hand full — right-click a hand card in the sidebar to sell it.</p>` : ""}`,
+     ${full ? `<p style="margin:10px 0 0;font-size:12px">Hand full — right-click a hand card to sell it.</p>` : ""}`,
   );
   document.querySelectorAll<HTMLElement>(".off[data-i]").forEach((el) => {
     el.onclick = () => {
@@ -1089,11 +1116,12 @@ function gameOver() {
   const o = G.last!;
   modal(
     `<h3>Quota missed</h3>
-     <p>You delivered <b style="color:var(--processor)">${o.payout.toLocaleString()}</b> against
-        <b>${o.quota.toLocaleString()}</b> on round ${o.round + 1} — short by
-        ${(o.quota - o.payout).toLocaleString()}.</p>
+     <div class="big" style="color:var(--processor)">${o.payout.toLocaleString()}
+       <span style="font-size:15px;color:var(--ink-muted)">/ ${o.quota.toLocaleString()}
+       · short ${(o.quota - o.payout).toLocaleString()}</span></div>
+     <p></p>
      <div class="row">
-       <button class="go" id="retry">Retry the round</button>
+       <button class="go" id="retry">↩ Retry round ${o.round + 1}</button>
        <button id="again">New run</button>
      </div>`,
   );
@@ -1130,13 +1158,15 @@ function newRun() {
 (document.getElementById("bRun") as HTMLElement).onclick = runShift;
 (document.getElementById("bSpeed") as HTMLElement).onclick = (e) => {
   ui.speed = ui.speed === 1 ? 4 : ui.speed === 4 ? 16 : 1;
-  (e.target as HTMLElement).textContent = `Speed ${ui.speed}×`;
+  (e.target as HTMLElement).textContent = `${ui.speed}×`;
 };
 (document.getElementById("bReset") as HTMLElement).onclick = () => {
   if (buildLocked()) return;
   for (const c of [...G.board]) if (c.m !== "vault") cmd(core.sell(c.x, c.y));
   paintAll();
 };
+(document.getElementById("bHelp") as HTMLElement).onclick = () =>
+  document.getElementById("helpOv")!.classList.toggle("on");
 
 window.addEventListener("resize", () => { layout(); draw(); });
 
@@ -1146,15 +1176,12 @@ paintAll();
 
 modal(
   `<h3>OVERFLOW</h3>
-   <p>Machines are <b>blueprints</b> you own: place them, move them, pull them back
-      to your hand — all free. Belts and junctions are cheap infrastructure. Route
-      items into the <b style="color:var(--vault)">Vault</b> and beat the quota in
-      ${G.shiftLen} ticks; the surplus is yours, and between rounds the
-      <b>shop</b> sells new blueprints. That surplus is your growth — overshoot
-      the quota as far as you can.</p>
-   <p>Start simple: a <b>Drill</b>, a run of <b>Belt</b> dragged toward the Vault, and a
-      <b>Furnace</b> in the middle to turn Ore into Ingots. Watch the projection panel —
-      it runs the whole shift for you before you commit.</p>
-   <button class="go" id="start">Start shift 1</button>`,
+   <p><b>Beat the quota.</b> Route items into the
+      <b style="color:var(--vault)">Vault</b>; the meter up top runs the whole shift
+      before you commit. Surplus is yours — the shop between rounds sells more
+      blueprints, and blueprints are forever: place, move, reclaim, free.</p>
+   <p>First line: <b>Drill</b> ▸▸▸ <b>Furnace</b> ▸▸▸ Vault.
+      Press <b>?</b> for controls.</p>
+   <button class="go row" id="start" style="width:100%">▶ Shift 1</button>`,
 );
 (document.getElementById("start") as HTMLElement).onclick = closeModal;

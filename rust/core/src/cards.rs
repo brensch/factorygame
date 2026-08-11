@@ -16,7 +16,7 @@
 //!
 //! Open design questions live in NOTES.md; this module is the mechanism.
 
-use crate::defs::{def, MachineId, CARD_POOL};
+use crate::defs::{def, directive, DirectiveId, MachineId, CARD_POOL, DIRECTIVE_POOL};
 use crate::rng::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,14 +25,27 @@ pub struct Card {
 }
 
 impl Card {
-    /// What the shop charges for it.
+    /// Base price, before the round multiplier.
     pub fn cost(self) -> u32 {
         def(self.machine).cost
     }
+}
 
-    /// What selling it back from your hand recovers.
-    pub fn sell_value(self) -> u32 {
-        def(self.machine).cost / 2
+/// One slot on the shop rack: a machine blueprint (goes to the hand) or a
+/// directive (applies to the run permanently on purchase).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Offer {
+    Machine(Card),
+    Directive(DirectiveId),
+}
+
+impl Offer {
+    /// Base price, before the round multiplier.
+    pub fn base_cost(self) -> u32 {
+        match self {
+            Offer::Machine(c) => c.cost(),
+            Offer::Directive(d) => directive(d).cost,
+        }
     }
 }
 
@@ -45,14 +58,17 @@ pub fn starting_hand() -> Vec<Card> {
         .collect()
 }
 
-/// One shop rack: `n` distinct offers from the unlocked pool.
-pub fn shop_offers(unlocked: &[MachineId], n: usize, rng: &mut Rng) -> Vec<Card> {
+/// One shop rack: `n - 1` distinct machine offers from the unlocked pool,
+/// plus one directive. The directive slot is the route-commitment lever —
+/// it competes with raw throughput for the same credits every single round.
+pub fn shop_rack(unlocked: &[MachineId], n: usize, rng: &mut Rng) -> Vec<Offer> {
     let mut pool: Vec<MachineId> = unlocked.to_vec();
     let mut out = Vec::with_capacity(n);
-    while out.len() < n && !pool.is_empty() {
+    while out.len() + 1 < n && !pool.is_empty() {
         let i = rng.below(pool.len());
-        out.push(Card { machine: pool.swap_remove(i) });
+        out.push(Offer::Machine(Card { machine: pool.swap_remove(i) }));
     }
+    out.push(Offer::Directive(DIRECTIVE_POOL[rng.below(DIRECTIVE_POOL.len())]));
     out
 }
 

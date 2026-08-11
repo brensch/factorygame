@@ -5,8 +5,8 @@
 //! drive. It owns no rendering and no policy — it exposes legal actions and
 //! applies them.
 
-use crate::cards::{default_unlocked, shop_offers, starting_hand, Card};
-use crate::defs::{def, Dir, MachineId, QUALITY_CAP};
+use crate::cards::{default_unlocked, shop_rack, starting_hand, Card, Offer};
+use crate::defs::{def, Dir, DirectiveId, MachineId, QUALITY_CAP};
 use crate::rng::Rng;
 use crate::sim::{FilterCfg, Placement, ShiftResult, Sim};
 
@@ -16,11 +16,25 @@ pub const QUOTAS: [i64; 12] = [20, 45, 90, 200, 400, 700, 1200, 2400, 4500, 8000
 /// Blueprints the hand can hold. Buying past this is refused, and so is
 /// pulling a machine off the board when there's no room for its card.
 pub const HAND_MAX: usize = 10;
-/// Offers on one shop rack.
+/// Offers on one shop rack (the last slot is always a directive).
 pub const SHOP_SIZE: usize = 5;
-/// Flat cost to reroll the rack.
-pub const REROLL_COST: u32 = 5;
+/// Base reroll price, before the round multiplier and escalation.
+pub const REROLL_BASE: u32 = 5;
 pub const STARTING_CREDITS: u32 = 15;
+
+/// Shop inflation: prices track the quota curve so a purchase stays a real
+/// decision all run — roughly "a machine costs a fifth of the next quota"
+/// once the curve outruns the base prices. Without this, mid-run surplus
+/// trivially buys the whole rack every round.
+pub fn shop_price_mult(round: usize) -> f64 {
+    let next = (round + 1).min(QUOTAS.len() - 1);
+    (QUOTAS[next] as f64 / 40.0).max(1.0)
+}
+
+/// A base price scaled for the shop of the given round.
+pub fn priced(base: u32, round: usize) -> u32 {
+    (base as f64 * shop_price_mult(round)).round() as u32
+}
 
 /// Rounds flagged as audits (zero-based). Mechanically, only the final one
 /// does anything yet — it halves the shift — the rest are flagged in the UI
@@ -61,9 +75,13 @@ pub struct Game {
     /// Persistent blueprint inventory, capped at [`HAND_MAX`].
     pub hand: Vec<Card>,
     /// The shop rack while `phase == Shop`.
-    pub offers: Vec<Card>,
+    pub offers: Vec<Offer>,
+    /// Directives owned this run — permanent, stacking, never placed.
+    pub directives: Vec<DirectiveId>,
     pub unlocked: Vec<MachineId>,
     pub history: Vec<RoundOutcome>,
+    /// Rerolls taken in the current shop; escalates the price.
+    rerolls: u32,
     rng: Rng,
     seed: u32,
 }
@@ -80,11 +98,24 @@ impl Game {
             board,
             hand: starting_hand(),
             offers: Vec::new(),
+            directives: Vec::new(),
             unlocked: default_unlocked(),
             history: Vec::new(),
+            rerolls: 0,
             rng,
             seed,
         }
+    }
+
+    /// What the shop currently charges for an offer.
+    pub fn offer_price(&self, o: Offer) -> u32 {
+        priced(o.base_cost(), self.round)
+    }
+
+    /// What the next reroll costs: base × round inflation × how many rerolls
+    /// this shop has already had. Fishing gets expensive fast.
+    pub fn reroll_price(&self) -> u32 {
+        priced(REROLL_BASE, self.round) * (self.rerolls + 1)
     }
 
     pub fn quota(&self) -> i64 {
@@ -99,7 +130,7 @@ impl Game {
         x >= 0 && y >= 0 && x < BOARD_W && y < BOARD_H
     }
 
-    fn buy_infra(&mut self, x: i32, y: i32, m: MachineId, d: Option<Dir>) -> Result<(), String> {
+    fn buy_infra(&mut self, x: i32, y: i32, m: MachineId, d: Option<Dir>, d2: Option<Dir>) -> Result<(), String> {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
         }
@@ -112,19 +143,29 @@ impl Game {
         }
         self.credits -= cost;
         let mut p = Placement::new(x, y, m, d);
-        p.d2 = None;
+        p.d2 = d2;
         self.board.push(p);
         Ok(())
     }
 
     /// Lay a belt — infrastructure, not a card. 1 credit.
     pub fn buy_belt(&mut self, x: i32, y: i32, d: Dir) -> Result<(), String> {
-        self.buy_infra(x, y, MachineId::Belt, Some(d))
+        self.buy_infra(x, y, MachineId::Belt, Some(d), None)
     }
 
     /// Place a junction — the crossing tile. Infrastructure, no orientation.
     pub fn buy_junction(&mut self, x: i32, y: i32) -> Result<(), String> {
-        self.buy_infra(x, y, MachineId::Junction, None)
+        self.buy_infra(x, y, MachineId::Junction, None, None)
+    }
+
+    /// Place a merger — accepts from every side, outputs one way.
+    pub fn buy_merger(&mut self, x: i32, y: i32, d: Dir) -> Result<(), String> {
+        self.buy_infra(x, y, MachineId::Merger, Some(d), None)
+    }
+
+    /// Place a splitter — alternates between `d` and the next edge clockwise.
+    pub fn buy_splitter(&mut self, x: i32, y: i32, d: Dir) -> Result<(), String> {
+        self.buy_infra(x, y, MachineId::Splitter, Some(d), Some(d.turn_cw()))
     }
 
     /// Play a blueprint from the hand: place its machine. Free — the card
@@ -153,8 +194,8 @@ impl Game {
         Ok(())
     }
 
-    /// Remove a placed machine. Infrastructure (belts, junctions) refunds its
-    /// credits; a real machine goes back to the hand as its blueprint.
+    /// Remove a placed machine. Infrastructure refunds its credits; a real
+    /// machine goes back to the hand as its blueprint.
     pub fn sell(&mut self, x: i32, y: i32) -> Result<(), String> {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
@@ -165,7 +206,7 @@ impl Game {
             .position(|p| p.x == x && p.y == y && p.m != MachineId::Vault)
             .ok_or("nothing sellable there")?;
         let m = self.board[i].m;
-        if matches!(m, MachineId::Belt | MachineId::Junction) {
+        if matches!(m, MachineId::Belt | MachineId::Junction | MachineId::Merger | MachineId::Splitter) {
             self.board.remove(i);
             self.credits += def(m).cost;
         } else {
@@ -178,14 +219,15 @@ impl Game {
         Ok(())
     }
 
-    /// Sell a blueprint out of the hand for half its shop price.
+    /// Sell a blueprint out of the hand for half its current shop price —
+    /// blueprints appreciate with the market.
     pub fn sell_blueprint(&mut self, hand_idx: usize) -> Result<(), String> {
         if matches!(self.phase, GamePhase::Over { .. }) {
             return Err("run is over".into());
         }
         let card = *self.hand.get(hand_idx).ok_or("no such card in hand")?;
         self.hand.remove(hand_idx);
-        self.credits += card.sell_value();
+        self.credits += priced(card.cost(), self.round) / 2;
         Ok(())
     }
 
@@ -277,11 +319,13 @@ impl Game {
         Ok(())
     }
 
-    /// The shift as a steppable sim — same board, same seed as `run_shift`,
-    /// so a renderer can animate tick by tick and the committed result is
-    /// guaranteed identical.
+    /// The shift as a steppable sim — same board, same seed, same directives
+    /// as `run_shift`, so a renderer can animate tick by tick and the
+    /// committed result is guaranteed identical.
     pub fn shift_sim(&self) -> Result<Sim, String> {
-        Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())
+        let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
+        sim.apply_directives(&self.directives);
+        Ok(sim)
     }
 
     /// Dry-run the shift without committing — the projection panel.
@@ -316,41 +360,62 @@ impl Game {
             if self.round + 1 >= QUOTAS.len() {
                 self.phase = GamePhase::Over { won: true };
             } else {
-                self.offers = shop_offers(&self.unlocked, SHOP_SIZE, &mut self.rng);
+                self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
+                self.rerolls = 0;
                 self.phase = GamePhase::Shop;
             }
         }
         Ok(self.history.last().unwrap())
     }
 
-    /// Buy the shop offer at `offer_idx` into the hand.
+    /// A missed quota isn't the end while you're iterating: rewind to the
+    /// build phase of the same round and try again. Board, hand, credits and
+    /// directives are exactly as you left them.
+    pub fn retry_round(&mut self) -> Result<(), String> {
+        if self.phase != (GamePhase::Over { won: false }) {
+            return Err("nothing to retry".into());
+        }
+        self.phase = GamePhase::Build;
+        Ok(())
+    }
+
+    /// Buy the shop offer at `offer_idx`: a machine goes to the hand, a
+    /// directive applies to the run immediately and permanently.
     pub fn shop_buy(&mut self, offer_idx: usize) -> Result<(), String> {
         if self.phase != GamePhase::Shop {
             return Err("the shop is closed".into());
         }
-        let card = *self.offers.get(offer_idx).ok_or("no such offer")?;
-        if self.credits < card.cost() {
-            return Err(format!("cannot afford {}", def(card.machine).name));
+        let offer = *self.offers.get(offer_idx).ok_or("no such offer")?;
+        let price = self.offer_price(offer);
+        if self.credits < price {
+            return Err("cannot afford that".into());
         }
-        if self.hand.len() >= HAND_MAX {
-            return Err("hand is full — sell a blueprint first".into());
+        if let Offer::Machine(_) = offer {
+            if self.hand.len() >= HAND_MAX {
+                return Err("hand is full — sell a blueprint first".into());
+            }
         }
-        self.credits -= card.cost();
+        self.credits -= price;
         self.offers.remove(offer_idx);
-        self.hand.push(card);
+        match offer {
+            Offer::Machine(c) => self.hand.push(c),
+            Offer::Directive(d) => self.directives.push(d),
+        }
         Ok(())
     }
 
-    /// Swap the rack for a fresh one, for [`REROLL_COST`].
+    /// Swap the rack for a fresh one. Each reroll in the same shop costs more.
     pub fn shop_reroll(&mut self) -> Result<(), String> {
         if self.phase != GamePhase::Shop {
             return Err("the shop is closed".into());
         }
-        if self.credits < REROLL_COST {
+        let price = self.reroll_price();
+        if self.credits < price {
             return Err("cannot afford a reroll".into());
         }
-        self.credits -= REROLL_COST;
-        self.offers = shop_offers(&self.unlocked, SHOP_SIZE, &mut self.rng);
+        self.credits -= price;
+        self.rerolls += 1;
+        self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
         Ok(())
     }
 

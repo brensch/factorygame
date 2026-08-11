@@ -120,8 +120,10 @@ fn a_whole_round_through_the_wire_format() {
     assert_eq!(field(&s, "err"), "null", "{s}");
     assert!(num(&s, "credits") < credits);
     let before_reroll = num(&s, "credits");
+    let reroll_price = num(&s, "rerollPrice");
     let s = call(shop_reroll());
-    assert_eq!(num(&s, "credits"), before_reroll - 5);
+    assert_eq!(num(&s, "credits"), before_reroll - reroll_price);
+    assert_eq!(num(&s, "rerollPrice"), reroll_price * 2, "rerolls escalate");
 
     let s = call(shop_done());
     assert_eq!(field(&s, "phase"), "build");

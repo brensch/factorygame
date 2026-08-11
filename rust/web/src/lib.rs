@@ -17,7 +17,8 @@ use overflow_core::defs::{
     def, Dir, ItemType, Kind, MachineId, Tag, CARD_POOL, DUP_CLONE_CHANCE, QUALITY_CAP,
     QUALITY_STEP,
 };
-use overflow_core::cards::Card;
+use overflow_core::cards::{Card, Offer};
+use overflow_core::defs::{directive, DirectiveId};
 use overflow_core::run::{is_audit, shift_len, Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
 use overflow_core::sim::{FilterCfg, Placement, Sim};
 use std::cell::RefCell;
@@ -158,10 +159,28 @@ pub extern "C" fn shop_done() -> usize {
     command(|g| g.shop_done())
 }
 
-/// Sell the hand blueprint at `hand_idx` for half its price.
+/// Sell the hand blueprint at `hand_idx` for half its current price.
 #[no_mangle]
 pub extern "C" fn sell_hand(hand_idx: u32) -> usize {
     command(|g| g.sell_blueprint(hand_idx as usize))
+}
+
+/// Place a merger — infrastructure, accepts from every side.
+#[no_mangle]
+pub extern "C" fn merger(x: i32, y: i32, d: i32) -> usize {
+    command(|g| g.buy_merger(x, y, dir_from(d)?))
+}
+
+/// Place a splitter — infrastructure, alternates `d` and the next edge CW.
+#[no_mangle]
+pub extern "C" fn splitter(x: i32, y: i32, d: i32) -> usize {
+    command(|g| g.buy_splitter(x, y, dir_from(d)?))
+}
+
+/// After a missed quota: rewind to the build phase of the same round.
+#[no_mangle]
+pub extern "C" fn retry() -> usize {
+    command(|g| g.retry_round())
 }
 
 /// Dry-run the whole shift: `{"payout":..,"inFlight":..,"jamTicks":..}`.
@@ -321,6 +340,16 @@ fn item_key(t: ItemType) -> &'static str {
     }
 }
 
+fn directive_key(d: DirectiveId) -> &'static str {
+    match d {
+        DirectiveId::Superheater => "superheater",
+        DirectiveId::Flywheel => "flywheel",
+        DirectiveId::Overvolt => "overvolt",
+        DirectiveId::FineTolerances => "tolerances",
+        DirectiveId::Enrichment => "enrichment",
+    }
+}
+
 fn tag_key(t: Tag) -> &'static str {
     match t {
         Tag::Heat => "heat",
@@ -455,7 +484,13 @@ fn catalog_json() -> String {
     for (i, m) in CARD_POOL
         .iter()
         .copied()
-        .chain([MachineId::Belt, MachineId::Junction, MachineId::Vault])
+        .chain([
+            MachineId::Belt,
+            MachineId::Junction,
+            MachineId::Merger,
+            MachineId::Splitter,
+            MachineId::Vault,
+        ])
         .enumerate()
     {
         if i > 0 {
@@ -587,17 +622,66 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         push_card(&mut s, *c);
     }
     s.push_str("],\"offers\":[");
-    for (i, c) in g.offers.iter().enumerate() {
+    for (i, o) in g.offers.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
-        push_card(&mut s, *c);
+        let price = g.offer_price(*o);
+        match *o {
+            Offer::Machine(c) => {
+                let d = def(c.machine);
+                let _ = write!(
+                    s,
+                    "{{\"type\":\"machine\",\"m\":\"{}\",\"name\":\"{}\",\"price\":{price},\"kind\":\"{}\"}}",
+                    machine_key(c.machine),
+                    d.name,
+                    kind_key(d.kind)
+                );
+            }
+            Offer::Directive(id) => {
+                let dd = directive(id);
+                let _ = write!(
+                    s,
+                    "{{\"type\":\"directive\",\"d\":\"{}\",\"name\":\"{}\",\"price\":{price},\"tag\":\"{}\",\"blurb\":\"",
+                    directive_key(id),
+                    dd.name,
+                    tag_key(dd.tag)
+                );
+                push_escaped(&mut s, dd.blurb);
+                s.push_str("\"}");
+            }
+        }
     }
+
+    // Owned directives, aggregated with counts.
+    s.push_str("],\"directives\":[");
+    let mut seen: Vec<(DirectiveId, u32)> = Vec::new();
+    for &d in &g.directives {
+        match seen.iter_mut().find(|(id, _)| *id == d) {
+            Some((_, n)) => *n += 1,
+            None => seen.push((d, 1)),
+        }
+    }
+    for (i, (id, n)) in seen.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let dd = directive(*id);
+        let _ = write!(
+            s,
+            "{{\"d\":\"{}\",\"name\":\"{}\",\"tag\":\"{}\",\"n\":{n}}}",
+            directive_key(*id),
+            dd.name,
+            tag_key(dd.tag)
+        );
+    }
+
     let _ = write!(
         s,
-        "],\"handMax\":{},\"rerollCost\":{},",
+        "],\"handMax\":{},\"rerollPrice\":{},\"priceMult\":{},",
         overflow_core::run::HAND_MAX,
-        overflow_core::run::REROLL_COST
+        g.reroll_price(),
+        overflow_core::run::shop_price_mult(g.round)
     );
 
     // The flow graph: every output edge on the board, and whether the tile it

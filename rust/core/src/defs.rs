@@ -213,12 +213,65 @@ pub fn def(id: MachineId) -> &'static MachineDef {
     }
 }
 
-/// Machines that can appear as blueprint cards. Belts are infrastructure, not
-/// cards (they'd clog every deck); Vaults are part of the board.
+/// Machines that can appear as blueprint cards. Routing primitives — belts,
+/// junctions, mergers, splitters — are infrastructure, always available and
+/// paid per tile; Vaults are part of the board.
 pub const CARD_POOL: &[MachineId] = &[
     M::Drill, M::Tap, M::Geode,
     M::Furnace, M::Retort, M::Lapidary, M::Compress,
     M::Fab, M::CircuitBench, M::LensGrinder, M::EngineWorks,
-    M::Merger, M::Splitter, M::Buffer, M::Filter,
+    M::Buffer, M::Filter,
     M::Overclock, M::Polisher, M::Heatsink, M::Dup,
 ];
+
+// ── directives ───────────────────────────────────────────────────────────────
+// Permanent run-wide buffs, keyed to a machine tag. Bought in the shop, never
+// placed, stack without limit. These are the route-commitment mechanic: every
+// directive you own makes machines of its tag better, which makes the next
+// shop's tagged offers more attractive than raw throughput.
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum DirectiveId {
+    Superheater, Flywheel, Overvolt, FineTolerances, Enrichment,
+}
+
+pub struct DirectiveDef {
+    pub id: DirectiveId,
+    pub name: &'static str,
+    pub tag: Tag,
+    /// Work-rate multiplier for machines carrying the tag.
+    pub speed: f64,
+    /// Quality added to tagged machines' outputs.
+    pub quality_out: i32,
+    /// Quality added per pass on tagged transport (Polisher's stat).
+    pub quality_transport: i32,
+    /// Base shop price, before the round multiplier.
+    pub cost: u32,
+    pub blurb: &'static str,
+}
+
+pub const DIRECTIVE_POOL: [DirectiveId; 5] = [
+    DirectiveId::Superheater, DirectiveId::Flywheel, DirectiveId::Overvolt,
+    DirectiveId::FineTolerances, DirectiveId::Enrichment,
+];
+
+pub fn directive(id: DirectiveId) -> &'static DirectiveDef {
+    use DirectiveId as D;
+    match id {
+        D::Superheater => &DirectiveDef { id: D::Superheater, name: "Superheater", tag: T::Heat,
+            speed: 1.3, quality_out: 0, quality_transport: 0, cost: 12,
+            blurb: "All HEAT machines work 30% faster, permanently. Stacks. The furnace-rush doctrine." },
+        D::Flywheel => &DirectiveDef { id: D::Flywheel, name: "Flywheel", tag: T::Kinetic,
+            speed: 1.3, quality_out: 0, quality_transport: 0, cost: 12,
+            blurb: "All KINETIC machines work 30% faster, permanently. Stacks. Drills, presses and fabricators spin up." },
+        D::Overvolt => &DirectiveDef { id: D::Overvolt, name: "Overvolt", tag: T::Volt,
+            speed: 1.3, quality_out: 0, quality_transport: 0, cost: 12,
+            blurb: "All VOLT machines work 30% faster, permanently. Stacks. The assembler-and-aura doctrine." },
+        D::FineTolerances => &DirectiveDef { id: D::FineTolerances, name: "Fine Tolerances", tag: T::Precision,
+            speed: 1.0, quality_out: 1, quality_transport: 1, cost: 15,
+            blurb: "PRECISION machines gain +1 output quality, and Polishers polish +1 more per pass. Stacks. The loop doctrine." },
+        D::Enrichment => &DirectiveDef { id: D::Enrichment, name: "Enrichment", tag: T::Organic,
+            speed: 1.0, quality_out: 1, quality_transport: 0, cost: 15,
+            blurb: "ORGANIC machines gain +1 output quality, permanently. Stacks. Sap runs rich." },
+    }
+}

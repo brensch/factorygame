@@ -12,6 +12,10 @@
 type Dir = "N" | "E" | "S" | "W";
 
 interface Card { m: string; name: string; cost: number; kind: string }
+type ShopOffer =
+  | { type: "machine"; m: string; name: string; price: number; kind: string }
+  | { type: "directive"; d: string; name: string; price: number; tag: string; blurb: string };
+interface OwnedDirective { d: string; name: string; tag: string; n: number }
 interface Pl {
   x: number; y: number; m: string; kind: string;
   d: Dir | null; d2: Dir | null; minQ: number | null;
@@ -24,8 +28,9 @@ interface State {
   round: number; credits: number; quota: number; shiftLen: number;
   audit: boolean; phase: "build" | "shop" | "over"; won: boolean;
   qualityCap: number; boardW: number; boardH: number;
-  board: Pl[]; hand: Card[]; offers: Card[];
-  handMax: number; rerollCost: number;
+  board: Pl[]; hand: Card[]; offers: ShopOffer[];
+  directives: OwnedDirective[];
+  handMax: number; rerollPrice: number; priceMult: number;
   nextQuota: number | null; nextAudit: boolean;
   auras: { x: number; y: number }[];
   flows: Flow[];
@@ -71,6 +76,9 @@ const core = wasm.instance.exports as {
   state(): number;
   belt(x: number, y: number, d: number): number;
   junction(x: number, y: number): number;
+  merger(x: number, y: number, d: number): number;
+  splitter(x: number, y: number, d: number): number;
+  retry(): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
   sell(x: number, y: number): number;
   sell_hand(i: number): number;
@@ -131,7 +139,13 @@ const ITEM_COLOR: Record<string, string> = {
 };
 
 // ── client state: what the player is doing, never what the game is ───────────
-type Tool = { kind: "belt" } | { kind: "junction" } | { kind: "card"; idx: number };
+type Infra = "belt" | "junction" | "merger" | "splitter";
+type Tool = { kind: Infra } | { kind: "card"; idx: number };
+
+const TAG_COLOR: Record<string, string> = {
+  heat: "#e8623c", kinetic: "#f0a63a", volt: "#8b7bf0",
+  precision: "#7fd8ff", organic: "#6fcf5f",
+};
 
 let G: State;
 const ui = {
@@ -398,9 +412,7 @@ function draw() {
   // ghost of the pending placement under the cursor, arrow showing where
   // its output will point (R rotates before placing)
   if (G.phase === "build" && !ui.animating && hover && !at(hover.x, hover.y) && !drag) {
-    const mKey = ui.tool.kind === "belt" ? "belt"
-      : ui.tool.kind === "junction" ? "junction"
-      : G.hand[ui.tool.idx]?.m;
+    const mKey = ui.tool.kind === "card" ? G.hand[ui.tool.idx]?.m : ui.tool.kind;
     const m = mKey ? MDEF.get(mKey) : undefined;
     if (m) {
       ctx.globalAlpha = 0.32;
@@ -491,14 +503,10 @@ function draw() {
 
 // ── placement ────────────────────────────────────────────────────────────────
 function placeAt(x: number, y: number, d: Dir) {
-  if (ui.tool.kind === "belt") {
-    cmd(core.belt(x, y, DCODE[d]));
-    return;
-  }
-  if (ui.tool.kind === "junction") {
-    cmd(core.junction(x, y));
-    return;
-  }
+  if (ui.tool.kind === "belt") { cmd(core.belt(x, y, DCODE[d])); return; }
+  if (ui.tool.kind === "junction") { cmd(core.junction(x, y)); return; }
+  if (ui.tool.kind === "merger") { cmd(core.merger(x, y, DCODE[d])); return; }
+  if (ui.tool.kind === "splitter") { cmd(core.splitter(x, y, DCODE[d])); return; }
   const card = G.hand[ui.tool.idx];
   if (!card) return;
   // Filters eject sideways by default; splitters split sideways. The core
@@ -515,17 +523,19 @@ function paintHand() {
   const pal = document.getElementById("pal")!;
   pal.innerHTML = "";
 
-  const infra = (kind: Tool["kind"], label: string, glyph: string, cost: number) => {
+  const infra = (kind: Infra, label: string, glyph: string, cost: number) => {
     const el = document.createElement("div");
     el.className = "pi" + (ui.tool.kind === kind ? " on" : "") + (G.credits >= cost ? "" : " no");
     el.innerHTML =
       `<div class="sw" style="background:${CAT.logistics}">${glyph}</div>` +
       `<div class="nm">${label}</div><div class="cs">${cost}c</div>`;
-    el.onclick = () => { ui.tool = { kind } as Tool; ui.selected = null; paintAll(); };
+    el.onclick = () => { ui.tool = { kind }; ui.selected = null; paintAll(); };
     pal.appendChild(el);
   };
   infra("belt", "Belt", "▸", 1);
   infra("junction", "Junction", "✚", 2);
+  infra("merger", "Merger", "⇒", 4);
+  infra("splitter", "Splitter", "⇉", 4);
 
   G.hand.forEach((card, i) => {
     const el = document.createElement("div");
@@ -537,7 +547,7 @@ function paintHand() {
     el.onclick = () => { ui.tool = { kind: "card", idx: i }; ui.selected = null; paintAll(); };
     el.oncontextmenu = (e) => {
       e.preventDefault();
-      const value = Math.floor(card.cost / 2);
+      const value = Math.floor(Math.round(card.cost * G.priceMult) / 2);
       if (cmd(core.sell_hand(i))) {
         if (ui.tool.kind === "card") ui.tool = { kind: "belt" };
         toast(`Sold ${card.name} blueprint for ${value}c`);
@@ -651,9 +661,8 @@ function paintInfo() {
   const title = document.getElementById("infoTitle")!;
   const body = document.getElementById("infoBody")!;
   // Priority: a selected placed machine, else the selected card or tool.
-  let key = ui.tool.kind === "junction" ? "junction" : "belt";
+  let key: string = ui.tool.kind === "card" ? (G.hand[ui.tool.idx]?.m ?? "belt") : ui.tool.kind;
   if (ui.selected) key = at(ui.selected.x, ui.selected.y)?.m ?? key;
-  else if (ui.tool.kind === "card") key = G.hand[ui.tool.idx]?.m ?? key;
   const m = MDEF.get(key);
   title.innerHTML = m ? `${m.name} <span class="deckinfo">${m.cost}c · ${m.kind}</span>` : "—";
   body.innerHTML = infoHTML(key);
@@ -709,8 +718,24 @@ function paintHeader() {
   g("hPay").textContent = ui.payout.toLocaleString();
 }
 
+function paintDirectives() {
+  const sec = document.getElementById("dirSec")!;
+  const box = document.getElementById("dirList")!;
+  if (!G.directives.length) {
+    sec.style.display = "none";
+    return;
+  }
+  sec.style.display = "";
+  box.innerHTML = G.directives
+    .map((d) =>
+      `<span class="dchip" style="border-color:${TAG_COLOR[d.tag]}88;color:${TAG_COLOR[d.tag]}">
+        ◆ ${d.name}${d.n > 1 ? ` ×${d.n}` : ""}</span>`)
+    .join("");
+}
+
 function paintAll() {
   paintHand();
+  paintDirectives();
   paintInfo();
   paintInspector();
   paintHeader();
@@ -918,6 +943,8 @@ window.addEventListener("keydown", (e) => {
   }
   if (e.key === "b" || e.key === "B") { ui.tool = { kind: "belt" }; paintAll(); }
   if (e.key === "j" || e.key === "J") { ui.tool = { kind: "junction" }; paintAll(); }
+  if (e.key === "m" || e.key === "M") { ui.tool = { kind: "merger" }; paintAll(); }
+  if (e.key === "s" || e.key === "S") { ui.tool = { kind: "splitter" }; paintAll(); }
   if (e.key === " ") { e.preventDefault(); runShift(); }
   const n = parseInt(e.key, 10);
   if (n >= 1 && n <= 9 && G.hand[n - 1]) {
@@ -1018,16 +1045,25 @@ function openShop() {
      <div class="kv" style="margin-bottom:10px;gap:7px;justify-content:flex-start"><span>Credits</span>
         <b style="color:var(--extractor)">${G.credits}</b>
         <span style="margin-left:auto">Hand</span><b>${G.hand.length}/${G.handMax}</b></div>
-     <div class="offers">${G.offers.map((c, i) => {
-       const afford = G.credits >= c.cost && !full;
+     <div class="offers">${G.offers.map((o, i) => {
+       if (o.type === "directive") {
+         const afford = G.credits >= o.price;
+         return `<div class="off dir${afford ? "" : " no"}" data-i="${i}"
+             style="border-color:${TAG_COLOR[o.tag]}66">
+           <div class="sw" style="background:${TAG_COLOR[o.tag]}">◆</div>
+           <div class="nm">${o.name}</div>
+           <div class="ds"><b>${o.price}c</b> · ${o.tag.toUpperCase()} doctrine</div>
+           <div class="bl">${o.blurb}</div></div>`;
+       }
+       const afford = G.credits >= o.price && !full;
        return `<div class="off${afford ? "" : " no"}" data-i="${i}">
-         <div class="sw" style="background:${CAT[c.kind]}">${SHORT[c.m] || "▸"}</div>
-         <div class="nm">${c.name}</div>
-         <div class="ds"><b>${c.cost}c</b> · ${mechShort(c.m)}</div>
-         <div class="bl">${MDEF.get(c.m)?.blurb ?? ""}</div></div>`;
+         <div class="sw" style="background:${CAT[o.kind]}">${SHORT[o.m] || "▸"}</div>
+         <div class="nm">${o.name}</div>
+         <div class="ds"><b>${o.price}c</b> · ${mechShort(o.m)}</div>
+         <div class="bl">${MDEF.get(o.m)?.blurb ?? ""}</div></div>`;
      }).join("")}</div>
      <div class="row">
-       <button id="reroll"${G.credits >= G.rerollCost ? "" : " disabled"}>Reroll rack — ${G.rerollCost}c</button>
+       <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>Reroll rack — ${G.rerollPrice}c</button>
        <button class="go" id="shopDone">Start round ${G.round + 2}</button>
      </div>
      ${full ? `<p style="margin:10px 0 0;font-size:12px">Hand full — right-click a hand card in the sidebar to sell it.</p>` : ""}`,
@@ -1054,9 +1090,19 @@ function gameOver() {
   modal(
     `<h3>Quota missed</h3>
      <p>You delivered <b style="color:var(--processor)">${o.payout.toLocaleString()}</b> against
-        <b>${o.quota.toLocaleString()}</b> on round ${o.round + 1}. The contract is terminated.</p>
-     <button class="go" id="again">New run</button>`,
+        <b>${o.quota.toLocaleString()}</b> on round ${o.round + 1} — short by
+        ${(o.quota - o.payout).toLocaleString()}.</p>
+     <div class="row">
+       <button class="go" id="retry">Retry the round</button>
+       <button id="again">New run</button>
+     </div>`,
   );
+  (document.getElementById("retry") as HTMLElement).onclick = () => {
+    if (cmd(core.retry())) {
+      closeModal();
+      paintAll();
+    }
+  };
   (document.getElementById("again") as HTMLElement).onclick = newRun;
 }
 

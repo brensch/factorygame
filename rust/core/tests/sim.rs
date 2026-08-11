@@ -3,8 +3,9 @@
 //! the 19 pinned numbers survived the crossing and now live only here.
 
 use overflow_core::boards::*;
+use overflow_core::cards::Offer;
 use overflow_core::defs::{item_value, Dir, ItemType, MachineId, QUALITY_CAP};
-use overflow_core::run::{Game, GamePhase, HAND_MAX, QUOTAS, REROLL_COST, SHOP_SIZE};
+use overflow_core::run::{Game, GamePhase, HAND_MAX, QUOTAS, SHOP_SIZE};
 use overflow_core::sim::{run_board, Placement, Sim};
 
 const SEED: u32 = 0xc0ffee;
@@ -212,12 +213,12 @@ fn a_full_scripted_round_1_clears_quota_and_opens_the_shop() {
     assert_eq!(g.phase, GamePhase::Shop);
     assert_eq!(g.offers.len(), SHOP_SIZE);
 
-    // buy something affordable, then leave
+    // buy a machine at its current (round-scaled) price, then leave
     let credits_before = g.credits;
-    let cheap = (0..g.offers.len()).min_by_key(|&i| g.offers[i].cost()).unwrap();
-    let cost = g.offers[cheap].cost();
-    g.shop_buy(cheap).unwrap();
-    assert_eq!(g.credits, credits_before - cost);
+    let idx = g.offers.iter().position(|o| matches!(o, Offer::Machine(_))).unwrap();
+    let price = g.offer_price(g.offers[idx]);
+    g.shop_buy(idx).unwrap();
+    assert_eq!(g.credits, credits_before - price);
     assert_eq!(g.hand.len(), 3); // 2 unplayed + the purchase
 
     g.shop_done().unwrap();
@@ -261,12 +262,13 @@ fn belts_refund_credits_but_machines_do_not() {
 }
 
 #[test]
-fn selling_a_blueprint_recovers_half_its_price() {
+fn selling_a_blueprint_recovers_half_its_current_price() {
     let mut g = Game::new(5);
     let i = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
     let before = g.credits;
     g.sell_blueprint(i).unwrap();
-    assert_eq!(g.credits, before + 5 / 2); // furnace costs 5, sells for 2
+    // round 0: furnace priced round(5 × 45/40) = 6, sells for 3
+    assert_eq!(g.credits, before + 3);
     assert_eq!(g.hand.len(), 3);
 }
 
@@ -281,14 +283,19 @@ fn the_hand_caps_at_ten_blueprints() {
         g.buy_belt(x, 3, Dir::E).unwrap();
     }
     g.run_shift().unwrap();
-    g.credits = 10_000; // not testing affordability here
+    g.credits = 100_000; // not testing affordability here
+    let machine_slot = |g: &Game| g.offers.iter().position(|o| matches!(o, Offer::Machine(_)));
     while g.hand.len() < HAND_MAX {
-        if g.offers.is_empty() {
-            g.shop_reroll().unwrap();
+        match machine_slot(&g) {
+            Some(i) => g.shop_buy(i).unwrap(),
+            None => g.shop_reroll().unwrap(),
         }
-        g.shop_buy(0).unwrap();
     }
-    assert!(g.shop_buy(0).is_err(), "buying past the cap must be refused");
+    while machine_slot(&g).is_none() {
+        g.shop_reroll().unwrap();
+    }
+    let i = machine_slot(&g).unwrap();
+    assert!(g.shop_buy(i).is_err(), "buying a machine past the cap must be refused");
     g.shop_done().unwrap();
     // ...and pulling a machine off the board is refused too while full
     assert!(g.sell(0, 3).is_err());
@@ -297,7 +304,7 @@ fn the_hand_caps_at_ten_blueprints() {
 }
 
 #[test]
-fn reroll_swaps_the_rack_and_charges_five() {
+fn rerolls_escalate_within_a_shop() {
     let mut g = Game::new(42);
     let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
     g.play_card(drill, 0, 3, Some(Dir::E), None, None).unwrap();
@@ -307,8 +314,62 @@ fn reroll_swaps_the_rack_and_charges_five() {
         g.buy_belt(x, 3, Dir::E).unwrap();
     }
     g.run_shift().unwrap();
+    let first = g.reroll_price();
     let before = g.credits;
     g.shop_reroll().unwrap();
-    assert_eq!(g.credits, before - REROLL_COST);
+    assert_eq!(g.credits, before - first);
     assert_eq!(g.offers.len(), SHOP_SIZE);
+    assert_eq!(g.reroll_price(), first * 2, "second reroll costs double");
+}
+
+#[test]
+fn shop_prices_track_the_quota_curve() {
+    use overflow_core::run::priced;
+    // round 0 shop (next quota 45): barely above base
+    assert_eq!(priced(3, 0), 3); // drill: 3 × 1.125 rounds back to 3
+    // round 4 shop (next quota 700): drill costs a real decision
+    assert_eq!(priced(3, 4), (3.0f64 * 700.0 / 40.0).round() as u32);
+}
+
+#[test]
+fn directives_buff_their_tag_and_stack() {
+    // A drill+furnace lane, then Flywheel (KINETIC): the drill speeds up.
+    let line = || {
+        let mut g = Game::new(42);
+        let drill = g.hand.iter().position(|c| c.machine == MachineId::Drill).unwrap();
+        g.play_card(drill, 0, 3, Some(Dir::E), None, None).unwrap();
+        let f = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
+        g.play_card(f, 4, 3, Some(Dir::E), None, None).unwrap();
+        for x in [1, 2, 3, 5, 6, 7, 8] {
+            g.buy_belt(x, 3, Dir::E).unwrap();
+        }
+        g
+    };
+    let base = line().project().unwrap().payout;
+
+    let mut g = line();
+    g.directives.push(overflow_core::defs::DirectiveId::Flywheel);
+    let buffed = g.project().unwrap().payout;
+    assert!(buffed > base, "flywheel must speed the kinetic drill: {base} -> {buffed}");
+
+    g.directives.push(overflow_core::defs::DirectiveId::Flywheel);
+    let stacked = g.project().unwrap().payout;
+    assert!(stacked > buffed, "directives stack: {buffed} -> {stacked}");
+
+    // An off-tag directive does nothing for this board.
+    let mut g = line();
+    g.directives.push(overflow_core::defs::DirectiveId::Enrichment);
+    assert_eq!(g.project().unwrap().payout, base);
+}
+
+#[test]
+fn retry_rewinds_a_failed_round() {
+    let mut g = Game::new(9);
+    let outcome = g.run_shift().unwrap(); // empty board: instant failure
+    assert!(!outcome.cleared);
+    assert_eq!(g.phase, GamePhase::Over { won: false });
+    g.retry_round().unwrap();
+    assert_eq!(g.phase, GamePhase::Build);
+    assert_eq!(g.round, 0);
+    assert_eq!(g.hand.len(), 4, "hand untouched by the failed attempt");
 }

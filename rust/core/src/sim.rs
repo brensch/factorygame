@@ -7,7 +7,8 @@
 //!   - Order-independent. Tile iteration order never affects the outcome.
 
 use crate::defs::{
-    def, item_value, Dir, ItemType, Kind, MachineDef, MachineId, DUP_CLONE_CHANCE, QUALITY_CAP,
+    def, directive, item_value, Dir, DirectiveId, ItemType, Kind, MachineDef, MachineId,
+    DUP_CLONE_CHANCE, QUALITY_CAP,
 };
 use crate::rng::Rng;
 
@@ -59,6 +60,9 @@ struct Tile {
     speed: f64,
     /// Aura-granted quality added to this machine's output.
     quality_out: i32,
+    /// Quality added per pass for transport tiles (Polisher's stat, plus
+    /// any directive bonus).
+    q_bonus: i32,
     jam_immune: bool,
     /// Splitter round-robin cursor.
     rr: u32,
@@ -122,7 +126,7 @@ impl Sim {
             .map(|_| Tile {
                 def: None, d: None, d2: None, cfg: FilterCfg::default(),
                 out: None, inputs: Vec::new(), progress: 0.0,
-                speed: 1.0, quality_out: 0, jam_immune: false, rr: 0, jdir: None,
+                speed: 1.0, quality_out: 0, q_bonus: 0, jam_immune: false, rr: 0, jdir: None,
             })
             .collect();
 
@@ -138,6 +142,7 @@ impl Sim {
             t.d = p.d;
             t.d2 = p.d2;
             t.cfg = p.cfg.unwrap_or_default();
+            t.q_bonus = def(p.m).quality_bonus;
         }
 
         let mut sim = Sim {
@@ -165,6 +170,23 @@ impl Sim {
         let id = self.next_id;
         self.next_id += 1;
         Item { id, ty, quality: quality.min(QUALITY_CAP) }
+    }
+
+    /// Directives are run-wide buffs keyed by machine tag, resolved into the
+    /// same flat per-tile stats as auras. Call before stepping; stacks.
+    pub fn apply_directives(&mut self, directives: &[DirectiveId]) {
+        for &id in directives {
+            let dd = directive(id);
+            for t in self.tiles.iter_mut() {
+                let Some(mdef) = t.def else { continue };
+                if !mdef.tags.contains(&dd.tag) {
+                    continue;
+                }
+                t.speed *= dd.speed;
+                t.quality_out += dd.quality_out;
+                t.q_bonus += dd.quality_transport;
+            }
+        }
     }
 
     /// Auras are resolved once, at build time, into flat per-tile stats.
@@ -280,7 +302,7 @@ impl Sim {
                 });
             }
             _ if d.transport => {
-                let q = (item.quality + d.quality_bonus).min(QUALITY_CAP);
+                let q = (item.quality + self.tiles[i].q_bonus).min(QUALITY_CAP);
                 let placed = Item { id: item.id, ty: item.ty, quality: q };
                 self.tiles[i].out = Some(placed);
                 self.tiles[i].jdir = travel;

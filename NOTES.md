@@ -57,15 +57,33 @@ at round 5 — and round 5 is a *board geometry* ceiling (7 rows = 7 lanes ≈ 4
 exactly the "widening must die here" wall the design wants. The next instrument is a TierBot
 that knows the Fabricator, to measure where tier-2 play dies.
 
+Same-day revisions after play (2026-08-10, v2.1):
+
+- **Prices track the quota curve** (`shop_price_mult` ≈ next-quota/40, floor 1×) and
+  **rerolls escalate** (base × inflation × count, reset per shop). Playtest verdict on flat
+  prices: "you just buy everything" — inflation restores the dilemma. Measured: LaneBot
+  clears round 4 in 607/2,000 (was 719 flat), geometric wall at 5 unchanged.
+- **Directives** — permanent, stacking, tag-keyed run buffs (Superheater/HEAT speed,
+  Flywheel/KINETIC speed, Overvolt/VOLT speed, Fine Tolerances/PRECISION quality incl.
+  Polisher passes, Enrichment/ORGANIC quality). One directive slot on every rack, competing
+  with throughput for the same credits: this is the route-commitment mechanic.
+- **Splitter and Merger became infrastructure** (always available, 4c) — routing primitives
+  shouldn't be shop RNG. Card pool is now machines-that-do-things only.
+- **Retry**: a missed quota offers "retry the round" (board/hand/credits as you left them).
+  Free for now; a real run structure may want to price it (a debt? a relic slot?).
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change
    both balance and the dopamine curve.
 2. **Should configuration live on the card?** A "Filter ≥7" card vs a "Filter ≥3" card,
    rather than a threshold set at placement — more draft texture, less fiddling.
-3. **Reroll pricing.** Flat 5c makes late-game fishing free in practice; escalating per-shop
-   rerolls (5, 10, 15…) may be needed once credits are large.
-4. **Hand cap 10.** Arbitrary; revisit once real runs show hoarding patterns.
+3. **Hand cap 10.** Arbitrary; revisit once real runs show hoarding patterns.
+4. **Directive depth.** Five directives is a proof of mechanic. The interesting versions
+   are conditional (per-tag payouts, "quality can exceed the cap for HEAT", cross-tag
+   combos) — add once the flat ones prove the route-commitment loop is fun.
+5. **Should retry cost something?** Free retries make quota tension advisory. Fine for
+   design iteration; wrong for the shipped roguelite.
 
 ## What the lab has measured so far
 

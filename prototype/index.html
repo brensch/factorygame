@@ -83,6 +83,10 @@
   .ichip i{width:8px;height:8px;border-radius:3px;display:inline-block;border:1px solid #0b0e13}
   .itags{font:600 10.5px/1 var(--mono);letter-spacing:.09em;color:var(--modifier)}
   .off .bl{font-size:10.5px;color:var(--ink-muted);line-height:1.4;margin-top:6px;text-align:left}
+  .off.dir{background:#1a2028}
+
+  .dchip{display:inline-flex;align-items:center;gap:4px;border:1px solid;border-radius:6px;
+         padding:3px 7px;margin:0 4px 4px 0;font:600 11px/1 var(--mono)}
 
   #toast{position:fixed;left:50%;bottom:26px;transform:translate(-50%,10px);opacity:0;
          background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
@@ -136,6 +140,11 @@
       <div class="pal" id="pal"></div>
     </div>
 
+    <div class="sec" id="dirSec" style="display:none">
+      <h2>Directives</h2>
+      <div id="dirList"></div>
+    </div>
+
     <div class="sec" id="info">
       <h2 id="infoTitle">—</h2>
       <div id="infoBody"></div>
@@ -177,6 +186,7 @@
         <b style="color:#5a6a7d">grey</b> open end ·
         <b style="color:#ff5d5d">red</b> won't accept.<br>
         <kbd>R</kbd> rotate · <kbd>B</kbd> belt · <kbd>J</kbd> junction ·
+        <kbd>M</kbd> merger · <kbd>S</kbd> splitter ·
         <kbd>1-9</kbd> pick card · <kbd>Space</kbd> run
       </div>
     </div>

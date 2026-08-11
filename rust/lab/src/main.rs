@@ -17,7 +17,8 @@
 //! Smarter bots raise that ceiling; the gap between bots measures how much
 //! depth the mechanics actually buy.
 
-use overflow_core::defs::{Dir, MachineId};
+use overflow_core::cards::Offer;
+use overflow_core::defs::{Dir, DirectiveId, MachineId};
 use overflow_core::run::{Game, GamePhase, BOARD_H, BOARD_W, QUOTAS};
 use overflow_core::sim::{Placement, Sim};
 use std::time::Instant;
@@ -114,8 +115,8 @@ impl LaneBot {
         }
     }
 
-    /// Shop strategy: buy every preferred card affordable (multipliers first,
-    /// then lane throughput), rerolling a few times while flush to fish.
+    /// Shop strategy: lane-relevant directives first (they compound), then
+    /// preferred machines, rerolling a few times while flush to fish.
     fn shop(&self, g: &mut Game) {
         const PREF: [MachineId; 5] = [
             MachineId::Polisher, MachineId::Heatsink, MachineId::Drill,
@@ -124,8 +125,23 @@ impl LaneBot {
         let mut rerolls = 0;
         loop {
             let mut bought = false;
+            while let Some(i) = g.offers.iter().position(|o| {
+                matches!(
+                    *o,
+                    Offer::Directive(DirectiveId::Flywheel | DirectiveId::Superheater)
+                )
+            }) {
+                if g.shop_buy(i).is_err() {
+                    break;
+                }
+                bought = true;
+            }
             for want in PREF {
-                while let Some(i) = g.offers.iter().position(|c| c.machine == want) {
+                while let Some(i) = g
+                    .offers
+                    .iter()
+                    .position(|o| matches!(*o, Offer::Machine(c) if c.machine == want))
+                {
                     if g.shop_buy(i).is_err() {
                         break;
                     }
@@ -133,7 +149,7 @@ impl LaneBot {
                 }
             }
             if !bought {
-                if rerolls < 4 && g.credits > 25 && g.shop_reroll().is_ok() {
+                if rerolls < 4 && g.credits > g.reroll_price() * 4 && g.shop_reroll().is_ok() {
                     rerolls += 1;
                     continue;
                 }

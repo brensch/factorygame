@@ -19,6 +19,7 @@ type Exports = {
   belt(x: number, y: number, d: number): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
   buy_lot(i: number, bay: number): number;
+  supply_done(): number;
   shift_start(): number;
   shift_step(): number;
   shift_finish(): number;
@@ -43,20 +44,27 @@ test("the shipped wasm plays a consignment round over the ABI", async () => {
   const { core, read } = await load();
 
   let s = read(core.boot(42));
-  expect(s.phase).toBe("build");
+  expect(s.phase).toBe("supply"); // a run opens at the supply window
   expect(s.credits).toBe(75);
   expect(s.quota).toBe(130);
   expect(s.bays.length).toBe(2);
   expect(s.bays[0].total + s.bays[1].total).toBe(120); // the starter consignment
+  expect(s.bays[0].slots[0].name).toBe("Starter Ore");
+  expect(s.lotOffers.length).toBe(3);
   expect(s.hand.length).toBe(4);
   expect(s.shiftsMax).toBe(3);
+  s = read(core.supply_done());
+  expect(s.phase).toBe("build");
 
-  // The starter build: a furnace beside each bay, lanes east, shared spine.
+  // The starter build: a 2×1 furnace kissing each bay, lanes east, spine.
   for (const [row, spineD] of [[6, S], [12, N]] as const) {
     const f = s.hand.findIndex((c: any) => c.m === "furnace");
     s = read(core.play(f, 1, row, E, -1, -1));
     expect(s.err).toBeNull();
-    for (let x = 2; x <= 15; x++) read(core.belt(x, row, E));
+    const placed = s.board.find((p: any) => p.m === "furnace" && p.y === row);
+    expect(placed.cells.length).toBe(2); // a real body
+    expect(placed.inPorts.length).toBe(1); // with a located intake
+    for (let x = 3; x <= 15; x++) read(core.belt(x, row, E));
     read(core.belt(16, row, spineD));
     const ys = row < 9 ? [7, 8] : [11, 10];
     for (const y of ys) read(core.belt(16, y, spineD));
@@ -88,24 +96,30 @@ test("the shipped wasm plays a consignment round over the ABI", async () => {
   const two = runShift();
   expect(two.state.phase).toBe("shop"); // quota cleared across two shifts
   expect(two.state.offers.length).toBe(5);
-  expect(two.state.lotOffers.length).toBe(3);
+  expect(two.state.contractOffers.length).toBe(2); // the top shelf
+  expect(two.state.lotOffers.length).toBe(0); // no shipments in the shop
   expect(typeof two.state.market).toBe("string");
 
-  // Buy a shipment to bay 0.
-  const credits = two.state.credits;
+  s = read(core.shop_done());
+  expect(s.phase).toBe("supply"); // rounds open at the supply window
+  expect(s.round).toBe(1);
+  expect(s.quota).toBe(175);
+  expect(s.lotOffers.length).toBe(3);
+
+  // Buy a shipment into bay 0's slots, then take the floor.
+  const credits = s.credits;
   s = read(core.buy_lot(0, 0));
   expect(s.err).toBeNull();
   expect(s.credits).toBeLessThan(credits);
 
-  s = read(core.shop_done());
+  s = read(core.supply_done());
   expect(s.phase).toBe("build");
-  expect(s.round).toBe(1);
-  expect(s.quota).toBe(175);
 });
 
 test("refused commands surface err and leave state untouched", async () => {
   const { core, read } = await load();
   read(core.boot(7));
+  read(core.supply_done());
   const before = JSON.stringify(read(core.state()));
   const s = read(core.belt(-1, 0, E));
   expect(s.err).not.toBeNull();

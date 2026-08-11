@@ -52,7 +52,7 @@ impl DockBot {
     }
 
     fn occupied(g: &Game, x: i32, y: i32) -> bool {
-        g.board.iter().any(|p| p.x == x && p.y == y)
+        g.board.iter().any(|p| Game::cells_of(p).contains(&(x, y)))
     }
 
     fn build(&mut self, g: &mut Game) {
@@ -104,7 +104,7 @@ impl DockBot {
                     g.rotate_d2(2, lane.row).unwrap();
                 }
             }
-            for x in 4..SPINE {
+            for x in 5..SPINE {
                 if !Self::occupied(g, x, lane.row) {
                     let _ = g.buy_belt(x, lane.row, Dir::E);
                 }
@@ -139,9 +139,11 @@ impl DockBot {
     /// Shop: fuel first (clean ore lots split across the bays), then more
     /// furnaces, then whatever compounds. Dirty lots are poison without
     /// filters; the bot knows its limits.
-    fn shop(&self, g: &mut Game) {
+    /// The supply window: buy clean ore into free slots, alternating bays.
+    fn supply(&self, g: &mut Game) {
         let mut bay = 0;
-        let buy_fuel = |g: &mut Game, bay: &mut usize| loop {
+        let mut rerolls = 0;
+        loop {
             let pick = g.lot_offers.iter().position(|l| {
                 l.entries.iter().any(|e| e.0 == ItemType::Ore)
                     && !l.entries.iter().any(|e| e.0 == ItemType::Slag)
@@ -149,16 +151,27 @@ impl DockBot {
             });
             match pick {
                 Some(i) => {
-                    if g.buy_lot(i, *bay).is_err() {
-                        break;
+                    if g.buy_lot(i, bay).is_err() {
+                        bay = (bay + 1) % g.bay_slots.len();
+                        if g.buy_lot(i, bay).is_err() {
+                            break; // both bays full or broke
+                        }
                     }
-                    *bay = (*bay + 1) % g.bay_queues.len();
+                    bay = (bay + 1) % g.bay_slots.len();
                 }
-                None => break,
+                None => {
+                    if rerolls < 2 && g.credits > g.reroll_price() * 6 && g.shop_reroll().is_ok() {
+                        rerolls += 1;
+                        continue;
+                    }
+                    break;
+                }
             }
-        };
-        // fuel first: an idle furnace bank earns nothing
-        buy_fuel(g, &mut bay);
+        }
+        g.supply_done().unwrap();
+    }
+
+    fn shop(&self, g: &mut Game) {
         // machines and compounding buys
         let mut rerolls = 0;
         loop {
@@ -177,18 +190,22 @@ impl DockBot {
                 }
             }
             while let Some(i) = g.offers.iter().position(|o| {
-                matches!(
-                    *o,
-                    Offer::Directive(DirectiveId::Superheater | DirectiveId::Flywheel)
-                        | Offer::Contract(ContractId::BulkManifests | ContractId::NightShifts)
-                )
+                matches!(*o, Offer::Directive(DirectiveId::Superheater | DirectiveId::Flywheel))
             }) {
                 if g.credits < g.offer_price(g.offers[i]) + 30 || g.shop_buy(i).is_err() {
                     break;
                 }
                 bought = true;
             }
-            buy_fuel(g, &mut bay);
+            // the contract shelf: input-granting deals compound for a hauler
+            while let Some(i) = g.contract_offers.iter().position(|c| {
+                matches!(c, ContractId::BulkManifests | ContractId::OreRetainer | ContractId::NightShifts)
+            }) {
+                if g.buy_contract(i).is_err() {
+                    break;
+                }
+                bought = true;
+            }
             if !bought {
                 if rerolls < 3 && g.credits > g.reroll_price() * 5 && g.shop_reroll().is_ok() {
                     rerolls += 1;
@@ -223,6 +240,9 @@ fn play_one(seed: u32) -> RunRecord {
             }
             GamePhase::Shop => {
                 bot.shop(&mut g);
+            }
+            GamePhase::Supply => {
+                bot.supply(&mut g);
             }
             GamePhase::Over { .. } => break,
         }

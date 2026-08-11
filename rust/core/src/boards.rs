@@ -13,13 +13,13 @@ fn fixed(x: i32, y: i32, m: M) -> Placement {
     Placement::new(x, y, m, None)
 }
 
-/// Act I, Round 1 — one drill, one furnace, one vault. Quota 20.
+/// Act I, Round 1 — one drill, one 2×1 furnace, one vault.
 pub fn round_1() -> (i32, i32, Vec<Placement>) {
     (8, 5, vec![
         p(0, 2, M::Drill, E),
         p(1, 2, M::Belt, E), p(2, 2, M::Belt, E),
-        p(3, 2, M::Furnace, E),
-        p(4, 2, M::Belt, E), p(5, 2, M::Belt, E), p(6, 2, M::Belt, E),
+        p(3, 2, M::Furnace, E), // body (3,2)+(4,2): in-port W, out-port E
+        p(5, 2, M::Belt, E), p(6, 2, M::Belt, E),
         fixed(7, 2, M::Vault),
     ])
 }
@@ -27,17 +27,22 @@ pub fn round_1() -> (i32, i32, Vec<Placement>) {
 /// Act I, Round 4 (Efficiency Audit) — two lanes, Heat Sink, Overclocker on
 /// the Fabricator (the bottleneck), Polisher before the vault. Quota 200.
 pub fn round_4() -> (i32, i32, Vec<Placement>) {
-    (8, 5, vec![
-        p(0, 1, M::Drill, E), p(1, 1, M::Belt, E), p(2, 1, M::Furnace, E),
-        p(3, 1, M::Belt, E), p(4, 1, M::Belt, S),
-        fixed(2, 2, M::Heatsink),
-        p(0, 3, M::Drill, E), p(1, 3, M::Belt, E), p(2, 3, M::Furnace, E),
-        p(3, 3, M::Belt, E), p(4, 3, M::Belt, N),
-        p(4, 2, M::Merger, E),
-        fixed(5, 1, M::Overclock),
-        p(5, 2, M::Fab, E),
-        p(6, 2, M::Polisher, E),
-        fixed(7, 2, M::Vault),
+    // Two smelting lanes feed the 2×2 Fabricator's two west in-ports
+    // directly — the shaped machine IS the merger now. Heat Sink touches
+    // furnace bodies on both lanes; Overclocker touches the fab's top row.
+    (10, 5, vec![
+        p(0, 1, M::Drill, E), p(1, 1, M::Belt, E),
+        p(2, 1, M::Furnace, E), // (2,1)+(3,1)
+        p(4, 1, M::Belt, E),
+        p(0, 3, M::Drill, E), p(1, 3, M::Belt, E),
+        p(2, 3, M::Furnace, E), // (2,3)+(3,3)
+        p(4, 3, M::Belt, N), p(4, 2, M::Belt, E),
+        fixed(2, 2, M::Heatsink), // touches both furnace bodies
+        fixed(5, 0, M::Overclock), // touches the fab's (5,1) cell
+        p(5, 1, M::Fab, E), // cells (5,1),(6,1),(5,2),(6,2); in W×2, out (6,2)E
+        p(7, 2, M::Polisher, E),
+        p(8, 2, M::Belt, E),
+        fixed(9, 2, M::Vault),
     ])
 }
 

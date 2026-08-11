@@ -17,8 +17,7 @@
 //! Open design questions live in NOTES.md; this module is the mechanism.
 
 use crate::defs::{
-    contract, def, directive, ContractId, DirectiveId, MachineId, CARD_POOL, CONTRACT_POOL,
-    DIRECTIVE_POOL,
+    contract, def, directive, ContractId, DirectiveId, MachineId, CARD_POOL, DIRECTIVE_POOL,
 };
 use crate::rng::Rng;
 
@@ -63,18 +62,17 @@ pub fn starting_hand() -> Vec<Card> {
         .collect()
 }
 
-/// One shop rack: `n - 2` distinct machine offers from the unlocked pool,
-/// plus one directive and one contract. The last two slots compete with raw
-/// throughput for the same credits every single round.
+/// The equipment shelf: `n - 1` distinct machine offers from the unlocked
+/// pool plus one directive. Contracts have their own shelf, rolled by the
+/// run structure.
 pub fn shop_rack(unlocked: &[MachineId], n: usize, rng: &mut Rng) -> Vec<Offer> {
     let mut pool: Vec<MachineId> = unlocked.to_vec();
     let mut out = Vec::with_capacity(n);
-    while out.len() + 2 < n && !pool.is_empty() {
+    while out.len() + 1 < n && !pool.is_empty() {
         let i = rng.below(pool.len());
         out.push(Offer::Machine(Card { machine: pool.swap_remove(i) }));
     }
     out.push(Offer::Directive(DIRECTIVE_POOL[rng.below(DIRECTIVE_POOL.len())]));
-    out.push(Offer::Contract(CONTRACT_POOL[rng.below(CONTRACT_POOL.len())]));
     out
 }
 

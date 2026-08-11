@@ -52,12 +52,18 @@ fn field(json: &str, key: &str) -> String {
 /// The starter build over the wire: a furnace beside each bay, lanes east,
 /// shared spine into the vault at (17,9).
 fn build_starter() {
+    // leave the supply window first — a run opens there
+    let s = call(state());
+    if field(&s, "phase") == "supply" {
+        call(supply_done());
+    }
     for (row, spine_d) in [(6i32, S), (12i32, 0 /* north */)] {
         let h = hand(&out_string());
         let f = h.iter().position(|m| m == "furnace").unwrap();
+        // the 2×1 furnace covers (1,row)+(2,row); belts start at 3
         let s = call(play(f as u32, 1, row, E, -1, -1));
         assert_eq!(field(&s, "err"), "null", "{s}");
-        for x in 2..=15 {
+        for x in 3..=15 {
             call(belt(x, row, E));
         }
         call(belt(16, row, spine_d));
@@ -89,7 +95,7 @@ fn run_one_shift() -> String {
 #[test]
 fn a_whole_round_through_the_wire_format() {
     let s = call(boot(42));
-    assert_eq!(field(&s, "phase"), "build");
+    assert_eq!(field(&s, "phase"), "supply", "a run opens at the supply window");
     assert_eq!(num(&s, "credits"), 75);
     assert_eq!(num(&s, "quota"), 130);
     assert_eq!(field(&s, "err"), "null");
@@ -97,11 +103,16 @@ fn a_whole_round_through_the_wire_format() {
     assert!(s.contains("\"m\":\"bay\""), "bays pre-placed: {s}");
     assert_eq!(hand(&s).len(), 4);
 
-    // The starter consignment waits at the docks.
+    // The starter consignment waits at the docks, in slots.
     let bays_at = s.find("\"bays\":[").unwrap();
     let bays = &s[bays_at..bays_at + s[bays_at..].find("],\"lotOffers\"").unwrap()];
     assert!(bays.contains("\"total\":70"), "{bays}");
     assert!(bays.contains("\"total\":50"), "{bays}");
+    assert!(bays.contains("\"slotMax\":3"), "{bays}");
+    assert!(bays.contains("Starter Ore"), "{bays}");
+    // and the placements carry their bodies: the vault is 1×1, but shaped
+    // machines will list multiple cells once placed
+    assert!(s.contains("\"cells\":[[17,9]]"), "{s}");
 
     build_starter();
 
@@ -117,31 +128,34 @@ fn a_whole_round_through_the_wire_format() {
     assert_eq!(field(&s, "phase"), "shop", "two shifts clear round 1: {s}");
     assert!(num(&s, "roundDelivered") >= 130, "the round total stays visible in the shop");
 
-    // The shop: 5 offers (machines + directive + contract) and 3 shipments.
+    // The shop: equipment (machines + directive) below, contracts up top.
     let offers_at = s.find("\"offers\":[").unwrap();
     let offers = &s[offers_at..offers_at + s[offers_at..].find(']').unwrap()];
     assert_eq!(offers.matches("\"name\":").count(), 5, "{offers}");
     assert!(offers.contains("\"type\":\"directive\""));
-    assert!(offers.contains("\"type\":\"contract\""));
-    let lots_at = s.find("\"lotOffers\":[").unwrap();
-    let lots = &s[lots_at..lots_at + s[lots_at..].find("],\"contracts\"").unwrap()];
-    assert_eq!(lots.matches("\"name\":").count(), 3, "{lots}");
+    let co_at = s.find("\"contractOffers\":[").unwrap();
+    let co = &s[co_at..co_at + s[co_at..].find("],").unwrap()];
+    assert_eq!(co.matches("\"name\":").count(), 2, "the contract shelf: {co}");
+    assert!(s.contains("\"lotOffers\":[]"), "no shipments in the shop: {s}");
 
-    // Buy the first shipment to bay 1: credits drop, its queue grows.
+    let s = call(shop_done());
+    assert_eq!(field(&s, "phase"), "supply", "the round opens with supply");
+    assert_eq!(num(&s, "round"), 1);
+    assert_eq!(num(&s, "quota"), 175);
+
+    // Buy a shipment into bay 1's slots, then take the floor.
     let credits = num(&s, "credits");
     let s = call(buy_lot(0, 1));
     assert_eq!(field(&s, "err"), "null", "{s}");
     assert!(num(&s, "credits") < credits);
-
-    let s = call(shop_done());
+    let s = call(supply_done());
     assert_eq!(field(&s, "phase"), "build");
-    assert_eq!(num(&s, "round"), 1);
-    assert_eq!(num(&s, "quota"), 175);
 }
 
 #[test]
 fn failing_all_shifts_offers_retry_and_retry_rewinds() {
     call(boot(7)); // idle factory: no processing at all
+    call(supply_done());
     for _ in 0..3 {
         run_one_shift();
     }
@@ -157,8 +171,9 @@ fn failing_all_shifts_offers_retry_and_retry_rewinds() {
 #[test]
 fn consumed_items_still_animate_their_final_hop() {
     call(boot(42));
-    // Furnace butted directly against bay A: the ore's only journey is
-    // bay→furnace, invisible in out slots — it must appear as a hop.
+    call(supply_done());
+    // Furnace port kissing bay A: the ore's only journey is bay→port,
+    // invisible in out slots — it must appear as a hop.
     let f = hand(&out_string()).iter().position(|m| m == "furnace").unwrap();
     call(play(f as u32, 1, 6, E, -1, -1));
 
@@ -178,16 +193,17 @@ fn consumed_items_still_animate_their_final_hop() {
 #[test]
 fn group_move_over_the_wire_is_atomic() {
     call(boot(42));
+    call(supply_done());
     let f = hand(&out_string()).iter().position(|m| m == "furnace").unwrap();
-    call(play(f as u32, 5, 3, E, -1, -1));
-    call(belt(6, 3, E));
+    call(play(f as u32, 5, 3, E, -1, -1)); // covers (5,3)+(6,3)
+    call(belt(7, 3, E));
 
     call(sel_add(5, 3));
-    call(sel_add(6, 3));
+    call(sel_add(7, 3));
     let s = call(sel_move(0, 1));
     assert_eq!(field(&s, "err"), "null");
     assert!(s.contains("\"x\":5,\"y\":4,\"m\":\"furnace\""), "{s}");
-    assert!(s.contains("\"x\":6,\"y\":4,\"m\":\"belt\""), "{s}");
+    assert!(s.contains("\"x\":7,\"y\":4,\"m\":\"belt\""), "{s}");
 
     // A refused move consumes the selection but changes no positions.
     call(sel_add(5, 4));
@@ -199,11 +215,24 @@ fn group_move_over_the_wire_is_atomic() {
 #[test]
 fn flows_report_ok_open_and_bad_connections() {
     call(boot(42));
+    call(supply_done());
     let f = hand(&out_string()).iter().position(|m| m == "furnace").unwrap();
-    let s = call(play(f as u32, 3, 3, E, -1, -1));
-    // Furnace pointing at an empty tile: an unfinished line, not an error.
+    let s = call(play(f as u32, 3, 3, E, -1, -1)); // covers (3,3)+(4,3)
+    // The furnace's OUT PORT (4,3) points at an empty tile: an open end.
     assert!(
-        s.contains("\"fx\":3,\"fy\":3,\"tx\":4,\"ty\":3,\"d\":\"E\",\"status\":\"open\""),
+        s.contains("\"fx\":4,\"fy\":3,\"tx\":5,\"ty\":3,\"d\":\"E\",\"status\":\"open\""),
+        "{s}"
+    );
+    // A belt poking the furnace's portless SOUTH flank: bad.
+    let s = call(belt(3, 4, 0 /* north */));
+    assert!(
+        s.contains("\"fx\":3,\"fy\":4,\"tx\":3,\"ty\":3,\"d\":\"N\",\"status\":\"bad\""),
+        "{s}"
+    );
+    // A belt into the furnace's west IN PORT: ok.
+    let s = call(belt(2, 3, E));
+    assert!(
+        s.contains("\"fx\":2,\"fy\":3,\"tx\":3,\"ty\":3,\"d\":\"E\",\"status\":\"ok\""),
         "{s}"
     );
 
@@ -213,19 +242,12 @@ fn flows_report_ok_open_and_bad_connections() {
         s.contains("\"fx\":1,\"fy\":6,\"tx\":0,\"ty\":6,\"d\":\"W\",\"status\":\"bad\""),
         "{s}"
     );
-
-    // Belt into the furnace: recipe machines accept ore-bearing lines — ok.
-    call(sell(1, 6));
-    let s = call(belt(2, 3, E));
-    assert!(
-        s.contains("\"fx\":2,\"fy\":3,\"tx\":3,\"ty\":3,\"d\":\"E\",\"status\":\"ok\""),
-        "belt into furnace: {s}"
-    );
 }
 
 #[test]
 fn filters_gate_by_type_over_the_wire() {
     call(boot(42));
+    call(supply_done());
     // No filter in the starting hand; the command surface still validates.
     call(belt(4, 4, E));
     let s = call(set_type_gate(4, 4, 13 /* slag */));
@@ -235,6 +257,7 @@ fn filters_gate_by_type_over_the_wire() {
 #[test]
 fn refused_commands_report_err_and_change_nothing() {
     call(boot(7));
+    call(supply_done());
     let before = call(state());
     let s = call(belt(-1, 0, E));
     assert_ne!(field(&s, "err"), "null");

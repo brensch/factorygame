@@ -14,8 +14,8 @@
 //! That invariant carried the first prototype and it carries this one.
 
 use overflow_core::defs::{
-    def, Dir, ItemType, Kind, MachineId, Tag, CARD_POOL, DUP_CLONE_CHANCE, QUALITY_CAP,
-    QUALITY_STEP,
+    def, shape_cells, shape_ports, Dir, ItemType, Kind, MachineId, Tag, CARD_POOL,
+    DUP_CLONE_CHANCE, QUALITY_CAP, QUALITY_STEP,
 };
 use overflow_core::cards::{Card, Offer};
 use overflow_core::defs::{contract, directive, ContractId, DirectiveId};
@@ -189,10 +189,28 @@ pub extern "C" fn chute(x: i32, y: i32) -> usize {
     command(|g| g.buy_chute(x, y))
 }
 
-/// Buy the shipment at `lot_idx`, queueing it at bay `bay_idx`.
+/// Buy the shipment at `lot_idx` into a free slot of bay `bay_idx`.
 #[no_mangle]
 pub extern "C" fn buy_lot(lot_idx: u32, bay_idx: u32) -> usize {
     command(|g| g.buy_lot(lot_idx as usize, bay_idx as usize))
+}
+
+/// Close the supply window; the round's floor work begins.
+#[no_mangle]
+pub extern "C" fn supply_done() -> usize {
+    command(|g| g.supply_done())
+}
+
+/// Buy the contract on the shop's top shelf at `idx`.
+#[no_mangle]
+pub extern "C" fn buy_contract(idx: u32) -> usize {
+    command(|g| g.buy_contract(idx as usize))
+}
+
+/// Sell an owned contract back for half its current price.
+#[no_mangle]
+pub extern "C" fn sell_contract(idx: u32) -> usize {
+    command(|g| g.sell_contract(idx as usize))
 }
 
 /// Set a Filter's item-type gate: an ITEM_TYPES code, or -1 to clear.
@@ -341,6 +359,10 @@ fn contract_key(c: ContractId) -> &'static str {
         ContractId::PuristClause => "purist",
         ContractId::FluxInjector => "fluxinjector",
         ContractId::NightShifts => "nightshifts",
+        ContractId::OreRetainer => "oreretainer",
+        ContractId::Prospector => "prospector",
+        ContractId::GearFutures => "gearfutures",
+        ContractId::ResinCall => "resincall",
     }
 }
 
@@ -490,6 +512,15 @@ fn push_machine_def(s: &mut String, m: MachineId) {
         "\"transport\":{},\"qualityBonus\":{},",
         d.transport, d.quality_bonus
     );
+    // the body in its default orientation, for placement ghosts
+    s.push_str("\"cells\":[");
+    for (i, (cx, cy)) in shape_cells(m, 0, 0, Dir::E).iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(s, "[{cx},{cy}]");
+    }
+    s.push_str("],");
     match &d.aura {
         Some(a) => {
             let _ = write!(
@@ -609,6 +640,25 @@ fn push_card(out: &mut String, c: Card) {
 fn push_placement(out: &mut String, p: &Placement) {
     let d = def(p.m);
     let _ = write!(out, "{{\"x\":{},\"y\":{},\"m\":\"{}\",\"kind\":\"{}\",", p.x, p.y, machine_key(p.m), kind_key(d.kind));
+    // the body: every cell this machine covers, and where items may enter
+    let orient = p.d.unwrap_or(Dir::E);
+    let cells = shape_cells(p.m, p.x, p.y, orient);
+    let (ins, _) = shape_ports(p.m, p.x, p.y, orient);
+    out.push_str("\"cells\":[");
+    for (i, (cx, cy)) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "[{cx},{cy}]");
+    }
+    out.push_str("],\"inPorts\":[");
+    for (i, (px, py, e)) in ins.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(out, "{{\"x\":{px},\"y\":{py},\"e\":\"{}\"}}", dir_key(*e));
+    }
+    out.push_str("],");
     push_dir(out, "d", p.d);
     out.push(',');
     push_dir(out, "d2", p.d2);
@@ -630,6 +680,7 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
     let (phase, won) = match g.phase {
         GamePhase::Build => ("build", false),
         GamePhase::Shop => ("shop", false),
+        GamePhase::Supply => ("supply", false),
         GamePhase::Over { won } => ("over", won),
     };
     let mut s = String::with_capacity(2048);
@@ -721,19 +772,33 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         }
     }
 
-    // The docks and their queues (summarized as runs of items).
+    // The docks: their slots, each holding a named consignment.
     s.push_str("],\"bays\":[");
-    for (i, ((bx, by), queue)) in g.bays().into_iter().zip(&g.bay_queues).enumerate() {
+    for (i, ((bx, by), slots)) in g.bays().into_iter().zip(&g.bay_slots).enumerate() {
         if i > 0 {
             s.push(',');
         }
-        let total: u32 = queue.iter().map(|e| e.1).sum();
-        let _ = write!(s, "{{\"x\":{bx},\"y\":{by},\"total\":{total},\"queue\":[");
-        for (j, &(ty, count, quality)) in queue.iter().enumerate() {
+        let total: u32 = slots.iter().flat_map(|l| l.runs.iter()).map(|e| e.1).sum();
+        let _ = write!(
+            s,
+            "{{\"x\":{bx},\"y\":{by},\"total\":{total},\"slotMax\":{},\"slots\":[",
+            overflow_core::run::BAY_SLOTS
+        );
+        for (j, lot) in slots.iter().enumerate() {
             if j > 0 {
                 s.push(',');
             }
-            let _ = write!(s, "{{\"t\":\"{}\",\"n\":{count},\"q\":{quality}}}", item_key(ty));
+            s.push_str("{\"name\":\"");
+            push_escaped(&mut s, &lot.name);
+            s.push_str("\",\"runs\":[");
+            for (k, &(ty, count, quality)) in lot.runs.iter().enumerate() {
+                if k > 0 {
+                    s.push(',');
+                }
+                let _ =
+                    write!(s, "{{\"t\":\"{}\",\"n\":{count},\"q\":{quality}}}", item_key(ty));
+            }
+            s.push_str("]}");
         }
         s.push_str("]}");
     }
@@ -756,14 +821,61 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
     }
     s.push_str("],");
 
-    // Contracts owned (the joker layer).
+    // Contracts owned (the joker layer), with term progress where relevant.
     s.push_str("\"contracts\":[");
-    for (i, &c) in g.contracts.iter().enumerate() {
+    for (i, inst) in g.contracts.iter().enumerate() {
         if i > 0 {
             s.push(',');
         }
-        let cd = contract(c);
-        let _ = write!(s, "{{\"c\":\"{}\",\"name\":\"{}\"}}", contract_key(c), cd.name);
+        let cd = contract(inst.id);
+        let _ = write!(
+            s,
+            "{{\"c\":\"{}\",\"name\":\"{}\",\"price\":{},",
+            contract_key(inst.id),
+            cd.name,
+            overflow_core::run::priced(cd.cost, g.round)
+        );
+        match cd.kind {
+            overflow_core::defs::ContractKind::Term { deliver, count, reward, .. } => {
+                let _ = write!(
+                    s,
+                    "\"term\":{{\"item\":\"{}\",\"need\":{count},\"progress\":{},\"roundsLeft\":{},\"reward\":{reward}}}}}",
+                    item_key(deliver),
+                    inst.progress,
+                    inst.rounds_left.unwrap_or(0)
+                );
+            }
+            overflow_core::defs::ContractKind::Ongoing => s.push_str("\"term\":null}"),
+        }
+    }
+    s.push_str("],");
+
+    // Contracts on offer (the shop's top shelf).
+    s.push_str("\"contractOffers\":[");
+    for (i, &id) in g.contract_offers.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let cd = contract(id);
+        let _ = write!(
+            s,
+            "{{\"c\":\"{}\",\"name\":\"{}\",\"price\":{},\"blurb\":\"",
+            contract_key(id),
+            cd.name,
+            g.offer_price(overflow_core::cards::Offer::Contract(id))
+        );
+        push_escaped(&mut s, cd.blurb);
+        s.push_str("\",");
+        match cd.kind {
+            overflow_core::defs::ContractKind::Term { deliver, count, rounds, reward } => {
+                let _ = write!(
+                    s,
+                    "\"term\":{{\"item\":\"{}\",\"need\":{count},\"rounds\":{rounds},\"reward\":{reward}}}}}",
+                    item_key(deliver)
+                );
+            }
+            overflow_core::defs::ContractKind::Ongoing => s.push_str("\"term\":null}"),
+        }
     }
     s.push_str("],");
 
@@ -838,8 +950,13 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         }
         // What this tile is known to emit; None for transport (cargo unknown).
         let emitted = d.produces.or(d.recipe.as_ref().map(|r| r.output));
+        // where the output leaves from: the shape's out port, or the anchor
+        let (out_cell, out_dir) = match shape_ports(p.m, p.x, p.y, p.d.unwrap_or(Dir::E)).1 {
+            Some((ox, oy, oe)) => ((ox, oy), Some(oe)),
+            None => ((p.x, p.y), p.d),
+        };
         let mut edges: Vec<(Dir, bool)> = Vec::new();
-        if let Some(dir) = p.d {
+        if let Some(dir) = out_dir {
             edges.push((dir, false));
         }
         if matches!(p.m, MachineId::Filter | MachineId::Splitter) {
@@ -849,23 +966,43 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         }
         for (dir, secondary) in edges {
             let (dx, dy) = dir.delta();
-            let (tx, ty) = (p.x + dx, p.y + dy);
+            let (tx, ty) = (out_cell.0 + dx, out_cell.1 + dy);
             let status = if tx < 0 || ty < 0 || tx >= BOARD_W || ty >= BOARD_H {
                 "bad"
             } else {
-                match g.board.iter().find(|q| q.x == tx && q.y == ty) {
+                let target = g.board.iter().find(|q| {
+                    shape_cells(q.m, q.x, q.y, q.d.unwrap_or(Dir::E)).contains(&(tx, ty))
+                });
+                match target {
                     None => "open",
                     Some(q) => {
                         let qd = def(q.m);
-                        if qd.kind == Kind::Vault || qd.transport {
+                        if qd.kind == Kind::Vault || qd.transport || q.m == MachineId::Chute {
                             "ok"
                         } else if let Some(r) = &qd.recipe {
-                            match emitted {
-                                Some(t) if !r.inputs.contains(&t) => "bad",
-                                _ => "ok",
+                            // shaped machines only accept through their ports
+                            let (ins, _) =
+                                shape_ports(q.m, q.x, q.y, q.d.unwrap_or(Dir::E));
+                            let entry = match dir {
+                                Dir::N => Dir::S,
+                                Dir::S => Dir::N,
+                                Dir::E => Dir::W,
+                                Dir::W => Dir::E,
+                            };
+                            let port_ok = ins.is_empty()
+                                || ins
+                                    .iter()
+                                    .any(|&(px, py, e)| (px, py) == (tx, ty) && e == entry);
+                            if !port_ok {
+                                "bad"
+                            } else {
+                                match emitted {
+                                    Some(t) if !r.inputs.contains(&t) => "bad",
+                                    _ => "ok",
+                                }
                             }
                         } else {
-                            "bad" // extractor or pure-aura modifier: never accepts
+                            "bad" // bays and pure-aura modifiers never accept
                         }
                     }
                 }
@@ -877,8 +1014,8 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
             let _ = write!(
                 s,
                 "{{\"fx\":{},\"fy\":{},\"tx\":{tx},\"ty\":{ty},\"d\":\"{}\",\"status\":\"{status}\",\"secondary\":{secondary}}}",
-                p.x,
-                p.y,
+                out_cell.0,
+                out_cell.1,
                 dir_key(dir)
             );
         }

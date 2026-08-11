@@ -7,9 +7,18 @@
 //!   - Order-independent. Tile iteration order never affects the outcome.
 
 use crate::defs::{
-    def, directive, item_value, Dir, DirectiveId, ItemType, Kind, MachineDef, MachineId, Tag,
-    DUP_CLONE_CHANCE, QUALITY_CAP,
+    def, directive, item_value, shape_cells, shape_ports, Dir, DirectiveId, ItemType, Kind,
+    MachineDef, MachineId, Tag, DUP_CLONE_CHANCE, QUALITY_CAP,
 };
+
+fn edge_idx(d: Dir) -> usize {
+    match d {
+        Dir::N => 0,
+        Dir::E => 1,
+        Dir::S => 2,
+        Dir::W => 3,
+    }
+}
 use crate::rng::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,6 +78,13 @@ struct Tile {
     /// Junction: the travel direction of the item currently on the tile —
     /// it exits the way it entered.
     jdir: Option<Dir>,
+    /// The tile index where this machine's working state lives (inputs,
+    /// progress, output). Multi-cell machines share one core; 1×1s are
+    /// their own core.
+    core: usize,
+    /// For shaped machines: which edges of THIS cell accept items.
+    /// None = legacy any-edge acceptance.
+    in_mask: Option<[bool; 4]>,
 }
 
 /// One item hop, emitted per tick so a renderer can interpolate motion.
@@ -149,22 +165,53 @@ impl Sim {
                 def: None, d: None, d2: None, cfg: FilterCfg::default(),
                 out: None, inputs: Vec::new(), progress: 0.0,
                 speed: 1.0, quality_out: 0, q_bonus: 0, jam_immune: false, rr: 0, jdir: None,
+                core: 0, in_mask: None,
             })
             .collect();
 
         for p in placements {
-            if p.x < 0 || p.y < 0 || p.x >= w || p.y >= h {
-                return Err(format!("placement out of bounds at {},{}", p.x, p.y));
+            let orient = p.d.unwrap_or(Dir::E);
+            let cells = shape_cells(p.m, p.x, p.y, orient);
+            let (ins, out_port) = shape_ports(p.m, p.x, p.y, orient);
+            // the core is where the machine works: its output-port cell
+            // (or the anchor for 1×1s)
+            let (core_x, core_y) = out_port.map(|(ox, oy, _)| (ox, oy)).unwrap_or((p.x, p.y));
+            for &(cx, cy) in &cells {
+                if cx < 0 || cy < 0 || cx >= w || cy >= h {
+                    return Err(format!("placement out of bounds at {cx},{cy}"));
+                }
+                let i = (cy * w + cx) as usize;
+                let t = &mut tiles[i];
+                if t.def.is_some() {
+                    return Err(format!("two machines on tile {cx},{cy}"));
+                }
+                t.def = Some(def(p.m));
+                t.core = (core_y * w + core_x) as usize;
+                t.q_bonus = def(p.m).quality_bonus;
+                if out_port.is_some() {
+                    // shaped: only listed input edges accept
+                    let mut mask = [false; 4];
+                    for &(ix, iy, e) in &ins {
+                        if (ix, iy) == (cx, cy) {
+                            mask[edge_idx(e)] = true;
+                        }
+                    }
+                    t.in_mask = Some(mask);
+                }
             }
-            let t = &mut tiles[(p.y * w + p.x) as usize];
-            if t.def.is_some() {
-                return Err(format!("two machines on tile {},{}", p.x, p.y));
+            let core_i = (core_y * w + core_x) as usize;
+            match out_port {
+                Some((_, _, e)) => tiles[core_i].d = Some(e),
+                None => tiles[core_i].d = p.d,
             }
-            t.def = Some(def(p.m));
-            t.d = p.d;
-            t.d2 = p.d2;
-            t.cfg = p.cfg.unwrap_or_default();
-            t.q_bonus = def(p.m).quality_bonus;
+            tiles[core_i].d2 = p.d2;
+            tiles[core_i].cfg = p.cfg.unwrap_or_default();
+        }
+        // 1×1s and transport point their core at themselves
+        for (i, t) in tiles.iter_mut().enumerate() {
+            if t.def.is_some() && t.in_mask.is_none() {
+                t.core = i;
+            }
         }
 
         let mut sim = Sim {
@@ -214,12 +261,13 @@ impl Sim {
             if t.def.is_none() {
                 continue;
             }
-            if s.buffered {
-                t.inputs.push(item);
-            } else if t.out.is_none() {
-                t.out = Some(item);
+            let core = t.core;
+            if s.buffered || core != i {
+                self.tiles[core].inputs.push(item);
+            } else if self.tiles[i].out.is_none() {
+                self.tiles[i].out = Some(item);
             } else {
-                t.inputs.push(item);
+                self.tiles[i].inputs.push(item);
             }
         }
     }
@@ -282,13 +330,14 @@ impl Sim {
                     continue;
                 }
                 let i = self.idx(nx, ny);
-                let n = &mut self.tiles[i];
-                let Some(ndef) = n.def else { continue };
+                let Some(ndef) = self.tiles[i].def else { continue };
                 if let Some(tag) = aura.only_tag {
                     if !ndef.tags.contains(&tag) {
                         continue;
                     }
                 }
+                let core = self.tiles[i].core;
+                let n = &mut self.tiles[core];
                 n.speed *= aura.speed;
                 n.quality_out += aura.quality_out;
                 if aura.no_jam {
@@ -333,8 +382,26 @@ impl Sim {
         Some(self.idx(nx, ny))
     }
 
+    /// Does this cell's port arrangement admit an item travelling in
+    /// direction `travel`? (Entering through the opposite edge.)
+    fn port_open(&self, i: usize, travel: Option<Dir>) -> bool {
+        match (self.tiles[i].in_mask, travel) {
+            (Some(mask), Some(t)) => {
+                let entry = match t {
+                    Dir::N => Dir::S,
+                    Dir::S => Dir::N,
+                    Dir::E => Dir::W,
+                    Dir::W => Dir::E,
+                };
+                mask[edge_idx(entry)]
+            }
+            (Some(_), None) => false,
+            (None, _) => true, // 1×1 legacy: any edge
+        }
+    }
+
     /// Can this tile take `item` right now, given its current contents?
-    fn can_accept(&self, i: usize, item: Item) -> bool {
+    fn can_accept(&self, i: usize, item: Item, travel: Option<Dir>) -> bool {
         let t = &self.tiles[i];
         let Some(d) = t.def else { return false };
         match d.kind {
@@ -343,15 +410,19 @@ impl Sim {
             _ if d.transport => t.out.is_none(),
             _ => match &d.recipe {
                 Some(r) => {
+                    if !self.port_open(i, travel) {
+                        return false;
+                    }
+                    let core = &self.tiles[t.core];
                     if item.ty == ItemType::Flux {
                         // one catalyst may wait in the hopper
-                        return t.inputs.iter().filter(|x| x.ty == ItemType::Flux).count() < 1;
+                        return core.inputs.iter().filter(|x| x.ty == ItemType::Flux).count() < 1;
                     }
                     let need = r.inputs.iter().filter(|&&x| x == item.ty).count();
                     if need == 0 {
                         return false;
                     }
-                    let have = t.inputs.iter().filter(|x| x.ty == item.ty).count();
+                    let have = core.inputs.iter().filter(|x| x.ty == item.ty).count();
                     have < need
                 }
                 None => false, // bays and pure modifiers never accept
@@ -360,14 +431,17 @@ impl Sim {
     }
 
     /// Structural compatibility, ignoring occupancy. Builds the flow graph.
-    fn could_accept(&self, i: usize, item: Item) -> bool {
+    fn could_accept(&self, i: usize, item: Item, travel: Option<Dir>) -> bool {
         let t = &self.tiles[i];
         let Some(d) = t.def else { return false };
         if d.kind == Kind::Vault || d.transport || d.id == MachineId::Chute {
             return true;
         }
         match &d.recipe {
-            Some(r) => item.ty == ItemType::Flux || r.inputs.contains(&item.ty),
+            Some(r) => {
+                self.port_open(i, travel)
+                    && (item.ty == ItemType::Flux || r.inputs.contains(&item.ty))
+            }
             None => false,
         }
     }
@@ -415,7 +489,10 @@ impl Sim {
                     self.tiles[i].inputs.push(clone);
                 }
             }
-            _ => self.tiles[i].inputs.push(item),
+            _ => {
+                let core = self.tiles[i].core;
+                self.tiles[core].inputs.push(item);
+            }
         }
     }
 
@@ -459,6 +536,9 @@ impl Sim {
             }
 
             if let Some(r) = &d.recipe {
+                if self.tiles[i].core != i {
+                    continue; // a limb of a shaped machine; the core works
+                }
                 let t = &self.tiles[i];
                 let ready = r.inputs.iter().all(|need| {
                     let want = r.inputs.iter().filter(|&&x| x == *need).count();
@@ -529,8 +609,9 @@ impl Sim {
             if self.tiles[i].def.is_none() {
                 continue;
             }
-            let Some(j) = self.neighbour(i, self.out_dir(i, item)) else { continue };
-            if !self.could_accept(j, item) {
+            let dir = self.out_dir(i, item);
+            let Some(j) = self.neighbour(i, dir) else { continue };
+            if !self.could_accept(j, item, dir) {
                 continue;
             }
             edge[i] = j as i32;
@@ -597,7 +678,8 @@ impl Sim {
                 if j < 0 {
                     continue;
                 }
-                if self.can_accept(j as usize, item) {
+                let travel = self.dir_between(i, j as usize);
+                if self.can_accept(j as usize, item, travel) {
                     self.commit_move(i, j as usize);
                 } else {
                     let t = &self.tiles[i];
@@ -630,7 +712,7 @@ impl Sim {
                         if j < 0 || moved[i] {
                             continue;
                         }
-                        if !self.can_accept(j as usize, item) {
+                        if !self.can_accept(j as usize, item, self.dir_between(i, j as usize)) {
                             continue;
                         }
                         self.commit_move(i, j as usize);

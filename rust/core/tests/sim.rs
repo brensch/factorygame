@@ -28,10 +28,11 @@ fn round_1_delivers_13_ingots_for_52_credits() {
 }
 
 #[test]
-fn round_1_first_ingot_lands_at_tick_12() {
+fn round_1_first_ingot_lands_at_tick_11() {
+    // (was tick 12 pre-shapes: the 2×1 furnace body replaced one belt)
     let (w, h, cells) = round_1();
     let r = run_board(w, h, &cells, 60, SEED).unwrap();
-    assert_eq!(r.delivered[0].tick, 12);
+    assert_eq!(r.delivered[0].tick, 11);
 }
 
 #[test]
@@ -45,12 +46,14 @@ fn round_1_two_items_stranded_and_zero_jams() {
 // ── Round 4 — Efficiency Audit ──────────────────────────────────────────────
 
 #[test]
-fn round_4_delivers_10_quality_2_gears_for_240() {
+fn round_4_delivers_12_quality_2_gears_for_288() {
+    // (was 10 gears / 240 pre-shapes: the fab's two west in-ports replace
+    // the merger bottleneck — feeding the shape directly is simply better)
     let (w, h, cells) = round_4();
     let r = run_board(w, h, &cells, 60, SEED).unwrap();
-    assert_eq!(r.count(ItemType::Gear), 10);
-    assert_eq!(r.payout, 240);
+    assert_eq!(r.count(ItemType::Gear), 12);
     assert!(r.delivered.iter().all(|d| d.quality == 2));
+    assert_eq!(r.payout, 288);
 }
 
 // ── belt loops ──────────────────────────────────────────────────────────────
@@ -187,6 +190,63 @@ fn junction_crosses_two_lanes_without_mixing() {
     assert!(r.count(ItemType::Sap) >= 7, "sap crossed: {}", r.count(ItemType::Sap));
 }
 
+#[test]
+fn shaped_machines_only_accept_through_their_ports() {
+    // A fab (2×2, in-ports on its west cells) with belts poking at its east
+    // and north sides: those items must NOT enter; a west feed must.
+    let cells = vec![
+        Placement::new(2, 1, MachineId::Fab, Some(Dir::E)), // cells (2..3,1..2)
+        Placement::new(1, 1, MachineId::Belt, Some(Dir::E)), // west feed: OK
+        Placement::new(4, 1, MachineId::Belt, Some(Dir::W)), // east poke: refused
+        Placement::new(2, 0, MachineId::Belt, Some(Dir::S)), // north poke: refused
+    ];
+    let mut s = Sim::new(6, 4, &cells, 1).unwrap();
+    s.seed_items(&[
+        overflow_core::sim::SeedItem { x: 1, y: 1, buffered: false, ty: ItemType::Ingot, quality: 0 },
+        overflow_core::sim::SeedItem { x: 4, y: 1, buffered: false, ty: ItemType::Ingot, quality: 0 },
+        overflow_core::sim::SeedItem { x: 2, y: 0, buffered: false, ty: ItemType::Ingot, quality: 0 },
+    ]);
+    for _ in 0..6 {
+        s.step();
+    }
+    // the west item entered; the pokes are still stuck on their belts
+    assert!(s.peek(4, 1).is_some(), "east poke refused by the portless edge");
+    assert!(s.peek(2, 0).is_some(), "north poke refused by the portless edge");
+    assert!(s.peek(1, 1).is_none(), "west feed accepted through the in-port");
+}
+
+#[test]
+fn shaped_machine_works_end_to_end_and_rotates() {
+    use overflow_core::defs::shape_cells;
+    // vertical lapidary: default is 1×2 (in N, out S); rotated S it becomes
+    // 2×1 flowing west-to-east... shapes rotate with their ports.
+    let mut e = shape_cells(MachineId::Lapidary, 3, 3, Dir::E);
+    let mut s_ = shape_cells(MachineId::Lapidary, 3, 3, Dir::S);
+    e.sort_unstable();
+    s_.sort_unstable();
+    assert_eq!(e, vec![(3, 3), (3, 4)]);
+    assert_eq!(s_, vec![(3, 3), (4, 3)]);
+
+    // fab fed on both west ports produces gears out its (1,1)-cell east edge
+    let cells = vec![
+        Placement::new(2, 1, MachineId::Fab, Some(Dir::E)),
+        Placement::new(1, 1, MachineId::Belt, Some(Dir::E)),
+        Placement::new(1, 2, MachineId::Belt, Some(Dir::E)),
+        Placement::new(4, 2, MachineId::Belt, Some(Dir::E)), // from out port (3,2)
+        Placement::new(5, 2, MachineId::Vault, None),
+    ];
+    let mut s = Sim::new(7, 4, &cells, 1).unwrap();
+    s.seed_items(&[
+        overflow_core::sim::SeedItem { x: 1, y: 1, buffered: false, ty: ItemType::Ingot, quality: 0 },
+        overflow_core::sim::SeedItem { x: 1, y: 2, buffered: false, ty: ItemType::Ingot, quality: 0 },
+    ]);
+    for _ in 0..15 {
+        s.step();
+    }
+    assert_eq!(s.delivered.len(), 1, "one gear out of the shaped fab");
+    assert_eq!(s.delivered[0].ty, ItemType::Gear);
+}
+
 // ── run structure: the hand and the shop ─────────────────────────────────────
 
 use overflow_core::defs::{ContractId, DirectiveId};
@@ -195,13 +255,23 @@ use overflow_core::run::{roll_lot, Game, SHIFTS_PER_ROUND};
 #[allow(unused_imports)]
 use overflow_core::run::HAND_MAX;
 
-/// The consignment starter build: a furnace beside each bay, a lane along
-/// the bay's row, and a shared spine into the vault at (17,9).
+/// Total items waiting across all bay slots.
+fn queued(g: &Game) -> u32 {
+    g.bay_slots.iter().flatten().flat_map(|l| l.runs.iter()).map(|e| e.1).sum()
+}
+
+/// The consignment starter build: a 2×1 furnace beside each bay (its west
+/// input port kissing the dock), a lane along the bay's row, and a shared
+/// spine into the vault at (17,9). Leaves the supply window first.
 fn build_starter(g: &mut Game) {
+    if g.phase == GamePhase::Supply {
+        g.supply_done().unwrap();
+    }
     for (row, toward) in [(6, Dir::S), (12, Dir::N)] {
         let f = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
+        // furnace covers (1,row)+(2,row): in-port W at (1,row), out E at (2,row)
         g.play_card(f, 1, row, Some(Dir::E), None, None).unwrap();
-        for x in 2..=15 {
+        for x in 3..=15 {
             g.buy_belt(x, row, Dir::E).unwrap();
         }
         g.buy_belt(16, row, toward).unwrap();
@@ -218,11 +288,12 @@ fn build_starter(g: &mut Game) {
 #[test]
 fn a_full_scripted_round_1_processes_the_starter_consignment() {
     let mut g = Game::new(42);
+    assert_eq!(g.phase, GamePhase::Supply, "a run opens at the supply window");
     assert_eq!(g.credits, 75);
     assert_eq!(g.hand.len(), 4); // three furnaces and a fab
     assert_eq!(g.bays().len(), 2);
-    let queued: u32 = g.bay_queues.iter().flatten().map(|e| e.1).sum();
-    assert_eq!(queued, 120, "the starter ore consignment waits at the docks");
+    assert_eq!(queued(&g), 120, "the starter ore consignment waits at the docks");
+    assert_eq!(g.lot_offers.len(), 3, "…and more is for sale");
 
     build_starter(&mut g);
 
@@ -236,27 +307,33 @@ fn a_full_scripted_round_1_processes_the_starter_consignment() {
     assert_eq!(g.phase, GamePhase::Shop, "the starter build must clear round 1");
     assert!(shifts >= 2, "one shift should NOT clear round 1 (got {shifts})");
 
-    // the shop: machines + a directive + a contract, and three shipments
+    // the shop: equipment (machines + directive) and a contract shelf
     assert_eq!(g.offers.len(), SHOP_SIZE);
     assert!(g.offers.iter().any(|o| matches!(o, Offer::Directive(_))));
-    assert!(g.offers.iter().any(|o| matches!(o, Offer::Contract(_))));
-    assert_eq!(g.lot_offers.len(), 3);
-
-    // buy a shipment to bay 0: queue grows, credits shrink
-    let price = g.lot_offers[0].price;
-    let before = g.credits;
-    g.buy_lot(0, 0).unwrap();
-    assert_eq!(g.credits, before - price);
-    assert!(!g.bay_queues[0].is_empty());
+    assert_eq!(g.contract_offers.len(), 2, "contracts get their own shelf");
+    assert!(g.lot_offers.is_empty(), "shipments are NOT sold in the shop");
 
     g.shop_done().unwrap();
     assert_eq!(g.round, 1);
+    assert_eq!(g.phase, GamePhase::Supply, "the supply window opens the round");
+    assert_eq!(g.lot_offers.len(), 3);
+
+    // buy a shipment into a bay slot: slots fill, credits shrink
+    let price = g.lot_offers[0].price;
+    let before = g.credits;
+    let slots_before = g.bay_slots[0].len();
+    g.buy_lot(0, 0).unwrap();
+    assert_eq!(g.credits, before - price);
+    assert_eq!(g.bay_slots[0].len(), slots_before + 1);
+
+    g.supply_done().unwrap();
     assert_eq!(g.phase, GamePhase::Build);
 }
 
 #[test]
 fn an_idle_factory_burns_all_three_shifts_then_dies() {
     let mut g = Game::new(9);
+    g.supply_done().unwrap();
     for _ in 0..SHIFTS_PER_ROUND - 1 {
         g.run_shift().unwrap();
         assert_eq!(g.phase, GamePhase::Build, "shifts remain");
@@ -269,8 +346,9 @@ fn an_idle_factory_burns_all_three_shifts_then_dies() {
 #[test]
 fn retry_rewinds_the_whole_round() {
     let mut g = Game::new(9);
+    g.supply_done().unwrap();
     let credits0 = g.credits;
-    let queue0 = g.bay_queues.clone();
+    let queue0 = g.bay_slots.clone();
     g.buy_belt(5, 5, Dir::E).unwrap(); // spend something
     for _ in 0..SHIFTS_PER_ROUND {
         g.run_shift().unwrap();
@@ -279,7 +357,7 @@ fn retry_rewinds_the_whole_round() {
     g.retry_round().unwrap();
     assert_eq!(g.phase, GamePhase::Build);
     assert_eq!(g.credits, credits0, "spent credits come back");
-    assert_eq!(g.bay_queues, queue0, "queues rewound");
+    assert_eq!(g.bay_slots, queue0, "slots rewound");
     assert!(!g.board.iter().any(|p| p.x == 5 && p.y == 5), "the belt is gone");
 }
 
@@ -289,14 +367,14 @@ fn the_factory_stays_warm_between_shifts() {
     build_starter(&mut g);
     g.run_shift().unwrap();
     assert!(!g.carry.is_empty(), "material still in the pipes after shift 1");
-    let queued: u32 = g.bay_queues.iter().flatten().map(|e| e.1).sum();
-    assert!(queued < 120, "the bays streamed some of their queues");
-    assert!(queued > 0, "40 ticks cannot drain 120 items from two bays");
+    assert!(queued(&g) < 120, "the bays streamed some of their slots");
+    assert!(queued(&g) > 0, "40 ticks cannot drain 120 items from two bays");
 }
 
 #[test]
 fn bays_and_vault_are_bolted_down() {
     let mut g = Game::new(1);
+    g.supply_done().unwrap();
     assert!(g.rotate(0, 6).is_err(), "bay");
     assert!(g.sell(0, 6).is_err(), "bay");
     assert!(g.move_by(&[(0, 6)], 1, 0).is_err(), "bay");
@@ -306,6 +384,7 @@ fn bays_and_vault_are_bolted_down() {
 #[test]
 fn selling_a_blueprint_recovers_half_its_current_price() {
     let mut g = Game::new(5);
+    g.supply_done().unwrap();
     let i = g.hand.iter().position(|c| c.machine == MachineId::Furnace).unwrap();
     let before = g.credits;
     g.sell_blueprint(i).unwrap();
@@ -436,18 +515,18 @@ fn crystal_cracks_in_junctions_unless_contracted() {
 #[test]
 fn flux_catalyzes_a_batch() {
     let cells = vec![
-        Placement::new(0, 0, MachineId::Furnace, Some(Dir::E)),
-        Placement::new(1, 0, MachineId::Vault, None),
+        Placement::new(0, 0, MachineId::Furnace, Some(Dir::E)), // (0,0)+(1,0)
+        Placement::new(2, 0, MachineId::Vault, None),
     ];
     let run = |with_flux: bool, bonus: i32| {
-        let mut s = Sim::new(3, 3, &cells, 1).unwrap();
+        let mut s = Sim::new(4, 3, &cells, 1).unwrap();
         s.flux_bonus = bonus;
         let mut seeds = vec![overflow_core::sim::SeedItem { x: 0, y: 0, buffered: true, ty: ItemType::Ore, quality: 0 }];
         if with_flux {
             seeds.push(overflow_core::sim::SeedItem { x: 0, y: 0, buffered: true, ty: ItemType::Flux, quality: 0 });
         }
         s.seed_items(&seeds);
-        for _ in 0..10 {
+        for _ in 0..12 {
             s.step();
         }
         s.delivered[0].quality

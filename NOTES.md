@@ -139,6 +139,24 @@ and outputs." Extractors are gone. The factory is a processor now.
   human capacity (no market play, splitter head-of-line losses, sells its fab), so
   felt difficulty is softer than the ratios suggest. First curve fit for feel, not final.
 
+## v3.1 (2026-08-11) — shapes, slots, the two shops, contracts that live
+
+- **Machines have bodies now.** Furnace/Retort 2×1, Lapidary 1×2, Compressor and
+  Fabricator 2×2 (two west in-ports), Circuit Bench and Lens Grinder L-shaped,
+  Engine Works a 4-cell T. Items enter ONLY through located in-ports (cyan
+  notches) and leave through the single out-port; rotation turns the whole body
+  and is refused when it doesn't fit. Feeding a Fab's two ports directly beats
+  the old merger funnel — the walkthrough round-4 board re-pinned 10→12 gears.
+- **Two shops.** End of round: contracts shelf on top, equipment below. Start of
+  round: the SUPPLY window — 3 consignments for sale, slotted into bays
+  (3 slots each). Unconsumed bay material re-forms as a "Remnants" lot.
+- **Contracts v2**: ongoing boosts, input-granting deals (Ore Retainer,
+  Prospector's Luck — free lots appear in open slots), and TERM deals with a
+  delivery requirement and expiry (Gear Futures: 15 gears in 3 rounds → 250).
+  Owned contracts show progress chips and sell back for half.
+- Tuning flag: DockBot's round-3 collapse (ratio ~0.5) persists — the bot
+  starves itself; quota shape needs a pass once a human confirms the feel.
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

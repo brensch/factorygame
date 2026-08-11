@@ -17,11 +17,15 @@ type ShopOffer =
   | { type: "directive"; d: string; name: string; price: number; tag: string; blurb: string }
   | { type: "contract"; c: string; name: string; price: number; blurb: string };
 interface OwnedDirective { d: string; name: string; tag: string; n: number }
-interface OwnedContract { c: string; name: string }
-interface BayState { x: number; y: number; total: number; queue: { t: string; n: number; q: number }[] }
+interface Term { item: string; need: number; progress?: number; rounds?: number; roundsLeft?: number; reward: number }
+interface OwnedContract { c: string; name: string; price: number; term: Term | null }
+interface ContractOffer { c: string; name: string; price: number; blurb: string; term: Term | null }
+interface SlotLot { name: string; runs: { t: string; n: number; q: number }[] }
+interface BayState { x: number; y: number; total: number; slotMax: number; slots: SlotLot[] }
 interface LotOffer { name: string; price: number; q: number; entries: { t: string; n: number }[] }
 interface Pl {
   x: number; y: number; m: string; kind: string;
+  cells: [number, number][]; inPorts: { x: number; y: number; e: Dir }[];
   d: Dir | null; d2: Dir | null; minQ: number | null; tg: string | null;
 }
 interface Outcome {
@@ -30,11 +34,11 @@ interface Outcome {
 }
 interface State {
   round: number; credits: number; quota: number; shiftLen: number;
-  audit: boolean; phase: "build" | "shop" | "over"; won: boolean;
+  audit: boolean; phase: "build" | "shop" | "supply" | "over"; won: boolean;
   qualityCap: number; boardW: number; boardH: number;
   board: Pl[]; hand: Card[]; offers: ShopOffer[];
   bays: BayState[]; lotOffers: LotOffer[];
-  contracts: OwnedContract[];
+  contracts: OwnedContract[]; contractOffers: ContractOffer[];
   shiftsUsed: number; shiftsMax: number; roundDelivered: number; carry: number;
   directives: OwnedDirective[];
   handMax: number; rerollPrice: number; priceMult: number;
@@ -62,7 +66,8 @@ interface CatM {
   m: string; name: string; kind: string; cost: number; tags: string[];
   produces: string | null; period: number; spawnQ: number;
   recipe: { inputs: string[]; output: string; ticks: number } | null;
-  transport: boolean; qualityBonus: number; aura: CatAura | null; blurb: string;
+  transport: boolean; qualityBonus: number; cells: [number, number][];
+  aura: CatAura | null; blurb: string;
 }
 interface Catalog {
   qualityStep: number; qualityCap: number; dupChance: number;
@@ -88,6 +93,9 @@ const core = wasm.instance.exports as {
   splitter(x: number, y: number, d: number): number;
   chute(x: number, y: number): number;
   buy_lot(i: number, bay: number): number;
+  supply_done(): number;
+  buy_contract(i: number): number;
+  sell_contract(i: number): number;
   set_type_gate(x: number, y: number, ty: number): number;
   retry(): number;
   play(i: number, x: number, y: number, d: number, d2: number, minQ: number): number;
@@ -114,6 +122,15 @@ function read<T>(len: number): T {
 
 const DCODE: Record<Dir, number> = { N: 0, E: 1, S: 2, W: 3 };
 const dc = (d: Dir | null) => (d === null ? -1 : DCODE[d]);
+
+/** Rotate default-orientation shape cells to `r`, normalized to (0,0). */
+function rotCells(cells: [number, number][], r: Dir): [number, number][] {
+  const rot = cells.map(([x, y]): [number, number] =>
+    r === "E" ? [x, y] : r === "S" ? [-y, x] : r === "W" ? [-x, -y] : [y, -x]);
+  const mx = Math.min(...rot.map((c) => c[0]));
+  const my = Math.min(...rot.map((c) => c[1]));
+  return rot.map(([x, y]) => [x - mx, y - my]);
+}
 
 // The machine catalogue: every definition the game runs on, exported by the
 // core so the UI can explain cards without owning any rules.
@@ -185,7 +202,8 @@ function cmd(len: number): boolean {
   return ok;
 }
 
-const at = (x: number, y: number) => G.board.find((p) => p.x === x && p.y === y);
+const at = (x: number, y: number) =>
+  G.board.find((p) => p.cells.some(([cx, cy]) => cx === x && cy === y));
 
 // ── canvas ───────────────────────────────────────────────────────────────────
 const cv = document.getElementById("cv") as HTMLCanvasElement;
@@ -311,9 +329,8 @@ function draw() {
   for (const c of G.board) {
     const col = CAT[c.kind];
     const cx = c.x * TILE + TILE / 2, cy = c.y * TILE + TILE / 2;
-    const k = `${c.x},${c.y}`;
-    const outs = outFlows.get(k) ?? [];
-    const ins = inFlows.get(k) ?? [];
+    const outs = c.cells.flatMap(([bx, by]) => outFlows.get(`${bx},${by}`) ?? []);
+    const ins = c.cells.flatMap(([bx, by]) => inFlows.get(`${bx},${by}`) ?? []);
 
     if (c.m === "bay") {
       ctx.fillStyle = "#2b3542";
@@ -386,22 +403,47 @@ function draw() {
         ctx.fillText("MRG", cx, cy + TILE * 0.3);
       }
     } else {
+      // the body: every cell, drawn as one slab (cells overlap slightly so
+      // the machine reads as a single piece)
+      const selectedHere = ui.selected && at(ui.selected.x, ui.selected.y) === c;
       ctx.fillStyle = col;
       ctx.globalAlpha = 0.92;
-      rr(c.x * TILE + 4, c.y * TILE + 4, TILE - 8, TILE - 8, 6);
-      ctx.fill();
+      for (const [bx, by] of c.cells) {
+        rr(bx * TILE + 2.5, by * TILE + 2.5, TILE - 5, TILE - 5, 6);
+        ctx.fill();
+      }
       ctx.globalAlpha = 1;
-
-      if (ui.selected && ui.selected.x === c.x && ui.selected.y === c.y) {
-        ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
-        rr(c.x * TILE + 1.5, c.y * TILE + 1.5, TILE - 3, TILE - 3, 7);
-        ctx.stroke();
+      if (c.cells.length > 1) {
+        // stitch the cells together visually
+        ctx.fillStyle = col;
+        for (const [bx, by] of c.cells) {
+          for (const [ox, oy] of c.cells) {
+            if (ox === bx + 1 && oy === by) {
+              ctx.fillRect((bx + 1) * TILE - 4, by * TILE + 6, 8, TILE - 12);
+            }
+            if (ox === bx && oy === by + 1) {
+              ctx.fillRect(bx * TILE + 6, (by + 1) * TILE - 4, TILE - 12, 8);
+            }
+          }
+        }
       }
 
+      if (selectedHere) {
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        for (const [bx, by] of c.cells) {
+          rr(bx * TILE + 1.5, by * TILE + 1.5, TILE - 3, TILE - 3, 7);
+          ctx.stroke();
+        }
+      }
+
+      // one label at the body's centre
+      const bcx = (Math.min(...c.cells.map((k) => k[0])) + Math.max(...c.cells.map((k) => k[0])) + 1) / 2 * TILE;
+      const bcy = (Math.min(...c.cells.map((k) => k[1])) + Math.max(...c.cells.map((k) => k[1])) + 1) / 2 * TILE;
       ctx.fillStyle = "#0b0e13";
       ctx.font = `700 ${Math.max(8, TILE * 0.21)}px ui-monospace,monospace`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(SHORT[c.m] ?? "", cx, cy);
+      ctx.fillText(SHORT[c.m] ?? "", bcx, bcy);
 
       if (c.m === "filter") {
         ctx.fillStyle = "#0b0e13";
@@ -410,9 +452,25 @@ function draw() {
         ctx.fillText(gate, cx, cy + TILE * 0.26);
       }
 
-      // ports: where it emits (coloured by the connection's verdict) and
-      // where it's being fed from
-      for (const f of outs) portOut(c.x, c.y, f.d, f.status, f.secondary);
+      // located ports: cyan intake notches where items may enter, coloured
+      // output nub where they leave (from the flow graph)
+      for (const p of c.inPorts) {
+        const [mx, my] = edgeMid(p.x, p.y, p.e);
+        const [dx2, dy2] = DIRV[p.e];
+        const px2 = -dy2, py2 = dx2;
+        const sz = Math.max(5, TILE * 0.14);
+        ctx.fillStyle = "#7fd8ff";
+        ctx.beginPath();
+        ctx.moveTo(mx - dx2 * sz, my - dy2 * sz); // tip inside the machine
+        ctx.lineTo(mx + px2 * sz * 0.9, my + py2 * sz * 0.9);
+        ctx.lineTo(mx - px2 * sz * 0.9, my - py2 * sz * 0.9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = "#0b0e13";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      for (const f of outs) portOut(f.fx, f.fy, f.d, f.status, f.secondary);
       for (const f of ins) portIn(c.x, c.y, f.d);
     }
   }
@@ -454,15 +512,22 @@ function draw() {
     const mKey = ui.tool.kind === "card" ? G.hand[ui.tool.idx]?.m : ui.tool.kind;
     const m = mKey ? MDEF.get(mKey) : undefined;
     if (m) {
+      const body = rotCells(m.cells, ui.dir);
+      const fits = body.every(([dx2, dy2]) =>
+        hover!.x + dx2 < G.boardW && hover!.y + dy2 < G.boardH && !at(hover!.x + dx2, hover!.y + dy2));
       ctx.globalAlpha = 0.32;
-      ctx.fillStyle = CAT[m.kind];
-      rr(hover.x * TILE + 4, hover.y * TILE + 4, TILE - 8, TILE - 8, 6);
-      ctx.fill();
+      ctx.fillStyle = fits ? CAT[m.kind] : FLOW_COLOR.bad;
+      for (const [dx2, dy2] of body) {
+        rr((hover.x + dx2) * TILE + 4, (hover.y + dy2) * TILE + 4, TILE - 8, TILE - 8, 6);
+        ctx.fill();
+      }
       ctx.globalAlpha = 1;
       ctx.strokeStyle = "#ffffff55"; ctx.lineWidth = 1.5;
-      rr(hover.x * TILE + 2, hover.y * TILE + 2, TILE - 4, TILE - 4, 7);
-      ctx.stroke();
-      if ((m.transport || m.produces || m.recipe) && m.m !== "junction") {
+      for (const [dx2, dy2] of body) {
+        rr((hover.x + dx2) * TILE + 2, (hover.y + dy2) * TILE + 2, TILE - 4, TILE - 4, 7);
+        ctx.stroke();
+      }
+      if ((m.transport || m.produces || m.recipe) && m.m !== "junction" && body.length === 1) {
         const hcx = hover.x * TILE + TILE / 2, hcy = hover.y * TILE + TILE / 2;
         arrow(hcx, hcy, ui.dir, TILE / 2 - 6, "#ffffffaa");
       }
@@ -510,32 +575,27 @@ function draw() {
   // tinted by whether it can land there
   if (drag?.mode === "move" && (drag.dx || drag.dy)) {
     const ok = moveValid(drag.tiles, drag.dx, drag.dy);
+    const moving = placementsOf(drag.tiles);
     ctx.fillStyle = "#0b0e13aa";
-    for (const k of drag.tiles) {
-      const [x, y] = k.split(",").map(Number);
-      rr(x * TILE + 1.5, y * TILE + 1.5, TILE - 3, TILE - 3, 5);
-      ctx.fill();
-    }
-    for (const k of drag.tiles) {
-      const [x, y] = k.split(",").map(Number);
-      const p = at(x, y);
-      if (!p) continue;
-      const gx = x + drag.dx, gy = y + drag.dy;
-      ctx.globalAlpha = 0.55;
-      ctx.fillStyle = p.m === "belt" || p.m === "merger" ? "#3a4655" : CAT[p.kind];
-      rr(gx * TILE + 4, gy * TILE + 4, TILE - 8, TILE - 8, 6);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      if (SHORT[p.m]) {
-        ctx.fillStyle = "#0b0e13";
-        ctx.font = `700 ${Math.max(8, TILE * 0.21)}px ui-monospace,monospace`;
-        ctx.textAlign = "center"; ctx.textBaseline = "middle";
-        ctx.fillText(SHORT[p.m], gx * TILE + TILE / 2, gy * TILE + TILE / 2);
+    for (const p of moving) {
+      for (const [x, y] of p.cells) {
+        rr(x * TILE + 1.5, y * TILE + 1.5, TILE - 3, TILE - 3, 5);
+        ctx.fill();
       }
-      ctx.strokeStyle = ok ? FLOW_COLOR.ok : FLOW_COLOR.bad;
-      ctx.lineWidth = 2;
-      rr(gx * TILE + 2, gy * TILE + 2, TILE - 4, TILE - 4, 7);
-      ctx.stroke();
+    }
+    for (const p of moving) {
+      for (const [x, y] of p.cells) {
+        const gx = x + drag.dx, gy = y + drag.dy;
+        ctx.globalAlpha = 0.55;
+        ctx.fillStyle = p.m === "belt" || p.m === "merger" ? "#3a4655" : CAT[p.kind];
+        rr(gx * TILE + 4, gy * TILE + 4, TILE - 8, TILE - 8, 6);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = ok ? FLOW_COLOR.ok : FLOW_COLOR.bad;
+        ctx.lineWidth = 2;
+        rr(gx * TILE + 2, gy * TILE + 2, TILE - 4, TILE - 4, 7);
+        ctx.stroke();
+      }
     }
   }
 }
@@ -853,8 +913,20 @@ function paintDirectives() {
       `<span class="dchip" style="border-color:${TAG_COLOR[d.tag]}88;color:${TAG_COLOR[d.tag]}"
         title="${d.name}">◆${d.n > 1 ? `×${d.n}` : ""}</span>`)
     .join("") + G.contracts
-    .map((c) => `<span class="dchip" style="border-color:#e8c86a88;color:#e8c86a" title="${c.name}">★</span>`)
+    .map((c, i) => {
+      const t = c.term;
+      const label = t ? `★${t.progress}/${t.need}·${t.roundsLeft}r` : "★";
+      return `<span class="dchip cchip" data-ci="${i}" style="border-color:#e8c86a88;color:#e8c86a"
+        title="${c.name} — right-click to sell for ◈${Math.floor(c.price / 2)}">${label}</span>`;
+    })
     .join("");
+  document.querySelectorAll<HTMLElement>(".cchip").forEach((el) => {
+    el.oncontextmenu = (e) => {
+      e.preventDefault();
+      if (cmd(core.sell_contract(+el.dataset.ci!))) toast("Contract sold");
+      paintAll();
+    };
+  });
 }
 
 function paintAll() {
@@ -917,16 +989,28 @@ function commitBeltRun(path: { x: number; y: number }[]) {
   }
 }
 
-/** Can the current move-drag land? Pure geometry; the core re-validates. */
-function moveValid(tiles: Set<string>, dx: number, dy: number): boolean {
+/** The distinct placements the tile-key selection covers. */
+function placementsOf(tiles: Set<string>): Pl[] {
+  const seen = new Set<Pl>();
   for (const k of tiles) {
     const [x, y] = k.split(",").map(Number);
     const p = at(x, y);
-    if (!p) continue;
-    const nx = x + dx, ny = y + dy;
-    if (nx < 0 || ny < 0 || nx >= G.boardW || ny >= G.boardH) return false;
-    const occ = at(nx, ny);
-    if (occ && !tiles.has(tk(nx, ny))) return false;
+    if (p && p.m !== "vault" && p.m !== "bay") seen.add(p);
+  }
+  return [...seen];
+}
+
+/** Can the current move-drag land? Pure geometry; the core re-validates. */
+function moveValid(tiles: Set<string>, dx: number, dy: number): boolean {
+  const moving = placementsOf(tiles);
+  const movingCells = new Set(moving.flatMap((p) => p.cells.map(([x, y]) => tk(x, y))));
+  for (const p of moving) {
+    for (const [x, y] of p.cells) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= G.boardW || ny >= G.boardH) return false;
+      const occ = at(nx, ny);
+      if (occ && !movingCells.has(tk(nx, ny))) return false;
+    }
   }
   return true;
 }
@@ -1031,7 +1115,8 @@ cv.addEventListener("pointerup", () => {
     const [ya, yb] = [Math.min(d.y0, d.y1), Math.max(d.y0, d.y1)];
     ui.multiSel = new Set(
       G.board
-        .filter((p) => p.m !== "vault" && p.x >= xa && p.x <= xb && p.y >= ya && p.y <= yb)
+        .filter((p) => p.m !== "vault" && p.m !== "bay"
+          && p.cells.some(([cx, cy]) => cx >= xa && cx <= xb && cy >= ya && cy <= yb))
         .map((p) => tk(p.x, p.y)),
     );
     ui.selected = null;
@@ -1183,9 +1268,73 @@ function modal(html: string) {
 }
 function closeModal() { document.getElementById("modal")!.classList.remove("on"); }
 
+/** The start-of-round supply window: consignments for sale, slotted into
+ *  the bays. Buying picks the bay; each bay holds a limited slot rack. */
+function openSupply() {
+  const bayBox = (b: BayState, i: number) => {
+    const slots = Array.from({ length: b.slotMax }, (_, k) => {
+      const lot = b.slots[k];
+      if (!lot) return `<div class="slot empty">empty</div>`;
+      const runs = lot.runs
+        .map((r) => `<span class="ichip"><i style="background:${ITEM_COLOR[r.t] ?? "#fff"}"></i>${r.n}</span>`)
+        .join(" ");
+      return `<div class="slot"><b>${lot.name}</b>${runs}</div>`;
+    }).join("");
+    return `<div class="baybox"><div class="bayhdr">BAY ${String.fromCharCode(65 + i)}</div>${slots}</div>`;
+  };
+  modal(
+    `<h3>Supply — round ${G.round + 1}</h3>
+     <div class="stripe">
+       <span class="chip gold">◈ <b>${G.credits}</b></span>
+       <span class="chip"><i>QUOTA</i> <b>${G.quota.toLocaleString()}</b></span>
+       <span class="chip" title="the spot market this round">
+         <span class="dot" style="background:${ITEM_COLOR[G.market] ?? "#fff"}"></span>
+         <b>${capName(G.market)}</b> ×${G.marketMult}</span>
+       ${G.auditTag ? `<span class="chip warn">⚠ ${G.auditTag.toUpperCase()} −40%</span>` : ""}
+     </div>
+     <div class="baywrap">${G.bays.map(bayBox).join("")}</div>
+     <div class="offers" style="grid-template-columns:repeat(auto-fit,minmax(175px,1fr))">${G.lotOffers.map((l, i) => {
+       const afford = G.credits >= l.price;
+       const contents = l.entries
+         .map((e) => `<span class="ichip"><i style="background:${ITEM_COLOR[e.t] ?? "#fff"}"></i>${e.n}× ${capName(e.t)}</span>`)
+         .join(" + ");
+       return `<div class="off lot${afford ? "" : " no"}">
+         <div class="nm">📦 ${l.name}${l.q ? ` <span style="color:var(--ink-muted)">q${l.q}</span>` : ""}</div>
+         <div class="ds">${contents}</div>
+         <div class="pr">◈ ${l.price}</div>
+         <div class="row" style="margin-top:6px">${G.bays.map((b, bi) => {
+           const full = b.slots.length >= b.slotMax;
+           return `<button data-lot-buy="${i}" data-bay="${bi}"${afford && !full ? "" : " disabled"}>→ ${String.fromCharCode(65 + bi)}</button>`;
+         }).join("")}</div></div>`;
+     }).join("")}</div>
+     <div class="row">
+       <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>↻ Reroll ◈${G.rerollPrice}</button>
+       <button class="go" id="supplyDone">▶ Take the floor</button>
+     </div>`,
+  );
+  document.querySelectorAll<HTMLElement>("[data-lot-buy]").forEach((el) => {
+    el.onclick = (e) => {
+      e.stopPropagation();
+      if (cmd(core.buy_lot(+el.dataset.lotBuy!, +el.dataset.bay!))) paintAll();
+      openSupply();
+    };
+  });
+  (document.getElementById("reroll") as HTMLElement).onclick = () => {
+    cmd(core.shop_reroll());
+    openSupply();
+  };
+  (document.getElementById("supplyDone") as HTMLElement).onclick = () => {
+    cmd(core.supply_done());
+    closeModal();
+    paintAll();
+  };
+}
+
 function openShop() {
   const o = G.last!;
   const full = G.hand.length >= G.handMax;
+  const termLine = (t: Term | null) =>
+    t ? `<div class="ds" style="color:var(--extractor)">deliver ${t.need}× ${capName(t.item)} in ${t.rounds ?? t.roundsLeft}r → ◈${t.reward}</div>` : "";
   modal(
     `<h3>Round ${G.round + 1} cleared</h3>
      <div class="big" style="color:var(--vault)">${G.roundDelivered.toLocaleString()}
@@ -1200,62 +1349,51 @@ function openShop() {
        ${G.auditTag ? `<span class="chip warn">⚠ ${G.auditTag.toUpperCase()} −40%</span>` : ""}
        <span class="chip"><i>HAND</i> <b>${G.hand.length}/${G.handMax}</b></span>
      </div>
-     <div class="offers">${G.offers.map((o, i) => {
-       if (o.type === "directive") {
-         const afford = G.credits >= o.price;
-         return `<div class="off dir${afford ? "" : " no"}" data-i="${i}"
-             style="border-color:${TAG_COLOR[o.tag]}66" title="${o.blurb}">
-           <div class="sw" style="background:${TAG_COLOR[o.tag]}">◆</div>
-           <div class="nm">${o.name}</div>
-           <div class="ds">${o.tag.toUpperCase()} doctrine · permanent</div>
-           <div class="pr">◈ ${o.price}</div></div>`;
-       }
-       if (o.type === "contract") {
-         const afford = G.credits >= o.price;
-         return `<div class="off dir${afford ? "" : " no"}" data-i="${i}"
-             style="border-color:#e8c86a88" title="${o.blurb}">
-           <div class="sw" style="background:#e8c86a">★</div>
-           <div class="nm">${o.name}</div>
-           <div class="ds">contract · permanent</div>
-           <div class="pr">◈ ${o.price}</div></div>`;
-       }
-       const afford = G.credits >= o.price && !full;
-       return `<div class="off${afford ? "" : " no"}" data-i="${i}" title="${MDEF.get(o.m)?.blurb ?? ""}">
-         <div class="sw" style="background:${CAT[o.kind]}">${SHORT[o.m] || "▸"}</div>
-         <div class="nm">${o.name}</div>
-         <div class="ds">${mechShort(o.m)}</div>
-         <div class="pr">◈ ${o.price}</div></div>`;
+     <div class="shelf">CONTRACTS</div>
+     <div class="offers" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr))">${G.contractOffers.map((c, i) => {
+       const afford = G.credits >= c.price;
+       return `<div class="off dir${afford ? "" : " no"}" data-c="${i}"
+           style="border-color:#e8c86a88" title="${c.blurb}">
+         <div class="sw" style="background:#e8c86a">★</div>
+         <div class="nm">${c.name}</div>
+         <div class="ds">${c.term ? "term deal" : "ongoing"}</div>
+         ${termLine(c.term)}
+         <div class="pr">◈ ${c.price}</div></div>`;
      }).join("")}</div>
-     <div class="offers" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">${G.lotOffers.map((l, i) => {
-       const afford = G.credits >= l.price;
-       const contents = l.entries
-         .map((e) => `<span class="ichip"><i style="background:${ITEM_COLOR[e.t] ?? "#fff"}"></i>${e.n}× ${capName(e.t)}</span>`)
-         .join(" + ");
-       return `<div class="off lot${afford ? "" : " no"}" data-lot="${i}">
-         <div class="nm">📦 ${l.name}${l.q ? ` <span style="color:var(--ink-muted)">q${l.q}</span>` : ""}</div>
-         <div class="ds">${contents}</div>
-         <div class="pr">◈ ${l.price}</div>
-         <div class="row" style="margin-top:6px">
-           <button data-lot-buy="${i}" data-bay="0"${afford ? "" : " disabled"}>→ Bay A</button>
-           <button data-lot-buy="${i}" data-bay="1"${afford ? "" : " disabled"}>→ Bay B</button>
-         </div></div>`;
+     <div class="shelf">EQUIPMENT</div>
+     <div class="offers">${G.offers.map((o2, i) => {
+       if (o2.type === "directive") {
+         const afford = G.credits >= o2.price;
+         return `<div class="off dir${afford ? "" : " no"}" data-i="${i}"
+             style="border-color:${TAG_COLOR[o2.tag]}66" title="${o2.blurb}">
+           <div class="sw" style="background:${TAG_COLOR[o2.tag]}">◆</div>
+           <div class="nm">${o2.name}</div>
+           <div class="ds">${o2.tag.toUpperCase()} doctrine</div>
+           <div class="pr">◈ ${o2.price}</div></div>`;
+       }
+       if (o2.type === "contract") return "";
+       const afford = G.credits >= o2.price && !full;
+       return `<div class="off${afford ? "" : " no"}" data-i="${i}" title="${MDEF.get(o2.m)?.blurb ?? ""}">
+         <div class="sw" style="background:${CAT[o2.kind]}">${SHORT[o2.m] || "▸"}</div>
+         <div class="nm">${o2.name}</div>
+         <div class="ds">${mechShort(o2.m)}</div>
+         <div class="pr">◈ ${o2.price}</div></div>`;
      }).join("")}</div>
      <div class="row">
        <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>↻ Reroll ◈${G.rerollPrice}</button>
-       <button class="go" id="shopDone">▶ Round ${G.round + 2}</button>
+       <button class="go" id="shopDone">▶ Supply run</button>
      </div>
      ${full ? `<p style="margin:10px 0 0;font-size:12px">Hand full — right-click a hand card to sell it.</p>` : ""}`,
   );
   document.querySelectorAll<HTMLElement>(".off[data-i]").forEach((el) => {
     el.onclick = () => {
       if (cmd(core.shop_buy(+el.dataset.i!))) paintAll();
-      openShop(); // re-render the rack either way
+      openShop();
     };
   });
-  document.querySelectorAll<HTMLElement>("[data-lot-buy]").forEach((el) => {
-    el.onclick = (e) => {
-      e.stopPropagation();
-      if (cmd(core.buy_lot(+el.dataset.lotBuy!, +el.dataset.bay!))) paintAll();
+  document.querySelectorAll<HTMLElement>(".off[data-c]").forEach((el) => {
+    el.onclick = () => {
+      if (cmd(core.buy_contract(+el.dataset.c!))) paintAll();
       openShop();
     };
   });
@@ -1266,6 +1404,7 @@ function openShop() {
   (document.getElementById("shopDone") as HTMLElement).onclick = () => {
     cmd(core.shop_done());
     closeModal();
+    if (G.phase === "supply") openSupply();
     paintAll();
   };
 }
@@ -1309,6 +1448,7 @@ function newRun() {
   ui.tick = 0;
   ui.payout = 0;
   closeModal();
+  if (G.phase === "supply") openSupply();
   paintAll();
 }
 
@@ -1345,4 +1485,7 @@ modal(
       Press <b>?</b> for controls.</p>
    <button class="go row" id="start" style="width:100%">▶ Shift 1</button>`,
 );
-(document.getElementById("start") as HTMLElement).onclick = closeModal;
+(document.getElementById("start") as HTMLElement).onclick = () => {
+  closeModal();
+  if (G.phase === "supply") openSupply();
+};

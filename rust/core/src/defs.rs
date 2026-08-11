@@ -102,6 +102,80 @@ pub enum MachineId {
     Vault, Bay, Chute,
 }
 
+/// One port on a machine shape: which cell, which edge of that cell.
+/// Defined in the shape's default (east-facing) orientation.
+pub struct Port {
+    pub dx: i32,
+    pub dy: i32,
+    pub edge: Dir,
+}
+
+/// A multi-cell machine body. Items may only enter through `ins` and the
+/// single finished-goods edge is `out`. Cells are offsets from the anchor.
+pub struct Shape {
+    pub cells: &'static [(i32, i32)],
+    pub ins: &'static [Port],
+    pub out: Port,
+}
+
+/// Rotate a cell offset from default (E) orientation to `r`.
+pub fn rot_cell(dx: i32, dy: i32, r: Dir) -> (i32, i32) {
+    match r {
+        Dir::E => (dx, dy),
+        Dir::S => (-dy, dx),
+        Dir::W => (-dx, -dy),
+        Dir::N => (dy, -dx),
+    }
+}
+
+/// Rotate an edge direction from default (E) orientation to `r`.
+pub fn rot_edge(d: Dir, r: Dir) -> Dir {
+    let steps = match r {
+        Dir::E => 0,
+        Dir::S => 1,
+        Dir::W => 2,
+        Dir::N => 3,
+    };
+    let mut out = d;
+    for _ in 0..steps {
+        out = out.turn_cw();
+    }
+    out
+}
+
+/// Absolute cells of a shape at (x, y) with orientation `r`, normalized so
+/// the anchor stays the top-left of the rotated bounding box.
+pub fn shape_cells(m: MachineId, x: i32, y: i32, r: Dir) -> Vec<(i32, i32)> {
+    match def(m).shape {
+        None => vec![(x, y)],
+        Some(sh) => {
+            let rot: Vec<(i32, i32)> =
+                sh.cells.iter().map(|&(dx, dy)| rot_cell(dx, dy, r)).collect();
+            let minx = rot.iter().map(|c| c.0).min().unwrap();
+            let miny = rot.iter().map(|c| c.1).min().unwrap();
+            rot.iter().map(|&(cx, cy)| (x + cx - minx, y + cy - miny)).collect()
+        }
+    }
+}
+
+/// An absolute port: (cell x, cell y, outward edge).
+pub type AbsPort = (i32, i32, Dir);
+
+/// Absolute ports of a shape at (x, y) with orientation `r`:
+/// (input ports, output port) — 1×1 machines return empty/None here and use
+/// their legacy any-edge behaviour.
+pub fn shape_ports(m: MachineId, x: i32, y: i32, r: Dir) -> (Vec<AbsPort>, Option<AbsPort>) {
+    let Some(sh) = def(m).shape else { return (Vec::new(), None) };
+    let rot: Vec<(i32, i32)> = sh.cells.iter().map(|&(dx, dy)| rot_cell(dx, dy, r)).collect();
+    let minx = rot.iter().map(|c| c.0).min().unwrap();
+    let miny = rot.iter().map(|c| c.1).min().unwrap();
+    let place = |p: &Port| {
+        let (cx, cy) = rot_cell(p.dx, p.dy, r);
+        (x + cx - minx, y + cy - miny, rot_edge(p.edge, r))
+    };
+    (sh.ins.iter().map(place).collect(), Some(place(&sh.out)))
+}
+
 pub struct Recipe {
     /// Item types consumed. Repeats mean "two of these".
     pub inputs: &'static [ItemType],
@@ -135,6 +209,8 @@ pub struct MachineDef {
     pub recipe: Option<Recipe>,
     /// Belt-like: holds exactly one item and passes it along.
     pub transport: bool,
+    /// Multi-cell body with located ports; None = a plain 1×1 machine.
+    pub shape: Option<&'static Shape>,
     /// Polisher: quality added to every item passing through.
     pub quality_bonus: i32,
     pub aura: Option<Aura>,
@@ -151,8 +227,46 @@ const BASE: MachineDef = MachineDef {
     spawn_quality: 0,
     recipe: None,
     transport: false,
+    shape: None,
     quality_bonus: 0,
     aura: None,
+};
+
+// ── the shapes: the factory gets a silhouette ────────────────────────────────
+const SHAPE_FURNACE: Shape = Shape {
+    cells: &[(0, 0), (1, 0)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::W }],
+    out: Port { dx: 1, dy: 0, edge: Dir::E },
+};
+const SHAPE_LAPIDARY: Shape = Shape {
+    cells: &[(0, 0), (0, 1)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::N }],
+    out: Port { dx: 0, dy: 1, edge: Dir::S },
+};
+const SHAPE_COMPRESS: Shape = Shape {
+    cells: &[(0, 0), (1, 0), (0, 1), (1, 1)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::W }, Port { dx: 0, dy: 1, edge: Dir::W }],
+    out: Port { dx: 1, dy: 0, edge: Dir::E },
+};
+const SHAPE_FAB: Shape = Shape {
+    cells: &[(0, 0), (1, 0), (0, 1), (1, 1)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::W }, Port { dx: 0, dy: 1, edge: Dir::W }],
+    out: Port { dx: 1, dy: 1, edge: Dir::E },
+};
+const SHAPE_CIRCUIT: Shape = Shape {
+    cells: &[(0, 0), (1, 0), (1, 1)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::W }, Port { dx: 1, dy: 1, edge: Dir::S }],
+    out: Port { dx: 1, dy: 0, edge: Dir::E },
+};
+const SHAPE_LENS: Shape = Shape {
+    cells: &[(0, 0), (0, 1), (1, 1)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::N }, Port { dx: 0, dy: 1, edge: Dir::W }],
+    out: Port { dx: 1, dy: 1, edge: Dir::E },
+};
+const SHAPE_ENGINE: Shape = Shape {
+    cells: &[(0, 0), (1, 0), (2, 0), (1, 1)],
+    ins: &[Port { dx: 0, dy: 0, edge: Dir::W }, Port { dx: 2, dy: 0, edge: Dir::E }],
+    out: Port { dx: 1, dy: 1, edge: Dir::S },
 };
 
 use ItemType as I;
@@ -171,30 +285,30 @@ pub fn def(id: MachineId) -> &'static MachineDef {
 
         // ── processors ──────────────────────────────────────────────────────
         M::Furnace => &MachineDef { id: M::Furnace, name: "Furnace", kind: Kind::Processor, cost: 5,
-            tags: &[T::Heat, T::Kinetic],
+            tags: &[T::Heat, T::Kinetic], shape: Some(&SHAPE_FURNACE),
             recipe: Some(Recipe { inputs: &[I::Ore], output: I::Ingot, ticks: 3.0 }), ..BASE },
         M::Retort => &MachineDef { id: M::Retort, name: "Retort", kind: Kind::Processor, cost: 5,
-            tags: &[T::Heat, T::Organic],
+            tags: &[T::Heat, T::Organic], shape: Some(&SHAPE_FURNACE),
             recipe: Some(Recipe { inputs: &[I::Sap], output: I::Resin, ticks: 3.0 }), ..BASE },
         M::Lapidary => &MachineDef { id: M::Lapidary, name: "Lapidary", kind: Kind::Processor, cost: 9,
-            tags: &[T::Precision],
+            tags: &[T::Precision], shape: Some(&SHAPE_LAPIDARY),
             recipe: Some(Recipe { inputs: &[I::Crystal], output: I::Shard, ticks: 5.0 }), ..BASE },
         M::Compress => &MachineDef { id: M::Compress, name: "Compressor", kind: Kind::Processor, cost: 14,
-            tags: &[T::Kinetic],
+            tags: &[T::Kinetic], shape: Some(&SHAPE_COMPRESS),
             recipe: Some(Recipe { inputs: &[I::Ore, I::Ore, I::Ore, I::Ore], output: I::Ingot, ticks: 4.0 }), ..BASE },
 
         // ── assemblers ──────────────────────────────────────────────────────
         M::Fab => &MachineDef { id: M::Fab, name: "Fabricator", kind: Kind::Assembler, cost: 12,
-            tags: &[T::Kinetic, T::Volt],
+            tags: &[T::Kinetic, T::Volt], shape: Some(&SHAPE_FAB),
             recipe: Some(Recipe { inputs: &[I::Ingot, I::Ingot], output: I::Gear, ticks: 5.0 }), ..BASE },
         M::CircuitBench => &MachineDef { id: M::CircuitBench, name: "Circuit Bench", kind: Kind::Assembler, cost: 16,
-            tags: &[T::Volt, T::Precision],
+            tags: &[T::Volt, T::Precision], shape: Some(&SHAPE_CIRCUIT),
             recipe: Some(Recipe { inputs: &[I::Ingot, I::Shard], output: I::Circuit, ticks: 6.0 }), ..BASE },
         M::LensGrinder => &MachineDef { id: M::LensGrinder, name: "Lens Grinder", kind: Kind::Assembler, cost: 16,
-            tags: &[T::Precision],
+            tags: &[T::Precision], shape: Some(&SHAPE_LENS),
             recipe: Some(Recipe { inputs: &[I::Shard, I::Resin], output: I::Lens, ticks: 6.0 }), ..BASE },
         M::EngineWorks => &MachineDef { id: M::EngineWorks, name: "Engine Works", kind: Kind::Assembler, cost: 30,
-            tags: &[T::Kinetic, T::Volt],
+            tags: &[T::Kinetic, T::Volt], shape: Some(&SHAPE_ENGINE),
             recipe: Some(Recipe { inputs: &[I::Gear, I::Circuit], output: I::Engine, ticks: 8.0 }), ..BASE },
 
         // ── logistics ───────────────────────────────────────────────────────
@@ -305,39 +419,62 @@ pub fn directive(id: DirectiveId) -> &'static DirectiveDef {
 pub enum ContractId {
     TarSands, BulkManifests, SweetTooth, GentleHands,
     GearSyndicate, PuristClause, FluxInjector, NightShifts,
+    OreRetainer, Prospector, GearFutures, ResinCall,
+}
+
+/// How a contract lives: forever, or as a term deal with a delivery
+/// requirement — fulfil it within the term for the reward, or it lapses.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ContractKind {
+    Ongoing,
+    Term { rounds: u32, deliver: ItemType, count: u32, reward: u32 },
 }
 
 pub struct ContractDef {
     pub id: ContractId,
     pub name: &'static str,
     pub cost: u32,
+    pub kind: ContractKind,
     pub blurb: &'static str,
 }
 
-pub const CONTRACT_POOL: [ContractId; 8] = [
+pub const CONTRACT_POOL: [ContractId; 12] = [
     ContractId::TarSands, ContractId::BulkManifests, ContractId::SweetTooth,
     ContractId::GentleHands, ContractId::GearSyndicate, ContractId::PuristClause,
     ContractId::FluxInjector, ContractId::NightShifts,
+    ContractId::OreRetainer, ContractId::Prospector, ContractId::GearFutures,
+    ContractId::ResinCall,
 ];
 
 pub fn contract(id: ContractId) -> &'static ContractDef {
     use ContractId as C;
+    use ContractKind::*;
     match id {
-        C::TarSands => &ContractDef { id: C::TarSands, name: "Tar Sands Deal", cost: 14,
+        C::OreRetainer => &ContractDef { id: C::OreRetainer, name: "Ore Retainer", cost: 20, kind: Ongoing,
+            blurb: "A standing order: a free 30-ore consignment arrives every round, if a bay slot is open." },
+        C::Prospector => &ContractDef { id: C::Prospector, name: "Prospector's Luck", cost: 15, kind: Ongoing,
+            blurb: "Every round there's a coin-flip chance a free crystal case turns up at the docks." },
+        C::GearFutures => &ContractDef { id: C::GearFutures, name: "Gear Futures", cost: 10,
+            kind: Term { rounds: 3, deliver: ItemType::Gear, count: 15, reward: 250 },
+            blurb: "Deliver 15 gears within 3 rounds → 250 credits. Miss the window and it lapses, worthless." },
+        C::ResinCall => &ContractDef { id: C::ResinCall, name: "Resin Call", cost: 8,
+            kind: Term { rounds: 3, deliver: ItemType::Resin, count: 25, reward: 180 },
+            blurb: "Deliver 25 resin within 3 rounds → 180 credits. Sap wilts; move fast." },
+        C::TarSands => &ContractDef { id: C::TarSands, name: "Tar Sands Deal", cost: 14, kind: Ongoing,
             blurb: "Every ore lot you buy carries +60% more ore — and +20% slag mixed in. Volume has a smell." },
-        C::BulkManifests => &ContractDef { id: C::BulkManifests, name: "Bulk Manifests", cost: 18,
+        C::BulkManifests => &ContractDef { id: C::BulkManifests, name: "Bulk Manifests", kind: Ongoing, cost: 18,
             blurb: "Every lot you buy is 30% larger. The paperwork rounds up." },
-        C::SweetTooth => &ContractDef { id: C::SweetTooth, name: "Sweet Tooth", cost: 12,
+        C::SweetTooth => &ContractDef { id: C::SweetTooth, name: "Sweet Tooth", kind: Ongoing, cost: 12,
             blurb: "Sap never wilts on your floor. Take your time." },
-        C::GentleHands => &ContractDef { id: C::GentleHands, name: "Gentle Hands", cost: 12,
+        C::GentleHands => &ContractDef { id: C::GentleHands, name: "Gentle Hands", kind: Ongoing, cost: 12,
             blurb: "Crystal no longer cracks in mergers, splitters or junctions." },
-        C::GearSyndicate => &ContractDef { id: C::GearSyndicate, name: "Gear Syndicate", cost: 16,
+        C::GearSyndicate => &ContractDef { id: C::GearSyndicate, name: "Gear Syndicate", kind: Ongoing, cost: 16,
             blurb: "The syndicate pays 1.5× for every gear delivered. Permanently. No questions." },
-        C::PuristClause => &ContractDef { id: C::PuristClause, name: "Purist Clause", cost: 16,
+        C::PuristClause => &ContractDef { id: C::PuristClause, name: "Purist Clause", kind: Ongoing, cost: 16,
             blurb: "Deliveries at quality 6+ pay 1.5×. Craftsmanship, rewarded." },
-        C::FluxInjector => &ContractDef { id: C::FluxInjector, name: "Flux Injector", cost: 14,
+        C::FluxInjector => &ContractDef { id: C::FluxInjector, name: "Flux Injector", kind: Ongoing, cost: 14,
             blurb: "Flux catalyzes +3 quality per batch instead of +2." },
-        C::NightShifts => &ContractDef { id: C::NightShifts, name: "Night Shifts", cost: 18,
+        C::NightShifts => &ContractDef { id: C::NightShifts, name: "Night Shifts", kind: Ongoing, cost: 18,
             blurb: "Every shift runs 8 ticks longer. The union looks the other way." },
     }
 }

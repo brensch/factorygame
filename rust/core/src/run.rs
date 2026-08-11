@@ -7,7 +7,8 @@
 
 use crate::cards::{default_unlocked, shop_rack, starting_hand, Card, Offer};
 use crate::defs::{
-    def, ContractId, Dir, DirectiveId, ItemType, MachineId, Tag, ITEM_TYPES, QUALITY_CAP, TAGS,
+    contract, def, shape_cells, ContractId, ContractKind, Dir, DirectiveId, ItemType, MachineId,
+    Tag, CONTRACT_POOL, ITEM_TYPES, QUALITY_CAP, TAGS,
 };
 use crate::rng::Rng;
 use crate::sim::{FilterCfg, Placement, SeedItem, ShiftResult, Sim};
@@ -23,6 +24,8 @@ pub const QUOTAS: [i64; 12] = [130, 175, 235, 310, 410, 540, 700, 900, 1170, 150
 /// credits.
 pub const SHIFTS_PER_ROUND: u32 = 3;
 pub const SHIFT_TICKS: u32 = 40;
+/// How many consignments a bay can hold queued at once.
+pub const BAY_SLOTS: usize = 3;
 /// Blueprints the hand can hold. Buying past this is refused, and so is
 /// pulling a machine off the board when there's no room for its card.
 pub const HAND_MAX: usize = 10;
@@ -127,10 +130,40 @@ pub fn roll_lot(round: usize, contracts: &[ContractId], rng: &mut Rng) -> Lot {
 pub enum GamePhase {
     /// Placing machines and belts; hand is live.
     Build,
-    /// The between-rounds shop: buy blueprints, reroll, continue.
+    /// The between-rounds shop: contracts up top, equipment below.
     Shop,
+    /// The start-of-round supply window: buy consignments, slot them at bays.
+    Supply,
     /// Run ended: cleared all rounds, or missed quota.
     Over { won: bool },
+}
+
+/// A consignment sitting in a bay slot: a name and runs of (type, count,
+/// quality), streamed in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlotLot {
+    pub name: String,
+    pub runs: Vec<(ItemType, u32, i32)>,
+}
+
+/// An owned contract: the deal, plus term-tracking when it isn't ongoing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContractInst {
+    pub id: ContractId,
+    /// Rounds remaining before a term contract lapses. None = ongoing.
+    pub rounds_left: Option<u32>,
+    /// Progress toward a term contract's delivery requirement.
+    pub progress: u32,
+}
+
+impl ContractInst {
+    pub fn new(id: ContractId) -> Self {
+        let rounds_left = match contract(id).kind {
+            ContractKind::Ongoing => None,
+            ContractKind::Term { rounds, .. } => Some(rounds),
+        };
+        Self { id, rounds_left, progress: 0 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -152,12 +185,15 @@ pub struct Game {
     pub offers: Vec<Offer>,
     /// Directives owned this run — permanent, stacking, never placed.
     pub directives: Vec<DirectiveId>,
-    /// Contracts owned this run — the joker layer, biasing input and output.
-    pub contracts: Vec<ContractId>,
-    /// Shipments on offer while the shop is open.
+    /// Contracts owned this run — the joker layer, biasing input and output,
+    /// granting free consignments, or demanding deliveries on a deadline.
+    pub contracts: Vec<ContractInst>,
+    /// Contracts on offer while the shop is open (their own shelf, up top).
+    pub contract_offers: Vec<ContractId>,
+    /// Shipments on offer while the supply window is open.
     pub lot_offers: Vec<Lot>,
-    /// Each bay's queue: (type, count, quality) runs, streamed in order.
-    pub bay_queues: Vec<Vec<(ItemType, u32, i32)>>,
+    /// Each bay's slots: up to [`BAY_SLOTS`] consignments, streamed in order.
+    pub bay_slots: Vec<Vec<SlotLot>>,
     /// Items still on the board between shifts — the warm factory.
     pub carry: Vec<SeedItem>,
     /// Shifts spent on the current round, of [`SHIFTS_PER_ROUND`].
@@ -186,8 +222,9 @@ struct Snapshot {
     credits: u32,
     board: Vec<Placement>,
     hand: Vec<Card>,
-    bay_queues: Vec<Vec<(ItemType, u32, i32)>>,
+    bay_slots: Vec<Vec<SlotLot>>,
     carry: Vec<SeedItem>,
+    contracts: Vec<ContractInst>,
 }
 
 impl Game {
@@ -200,21 +237,22 @@ impl Game {
             Placement::new(0, BOARD_H / 2 + 3, MachineId::Bay, Some(Dir::E)),
         ];
         // Head office sends a starter consignment, split across the docks.
-        let bay_queues = vec![
-            vec![(ItemType::Ore, 70, 0)],
-            vec![(ItemType::Ore, 50, 0)],
+        let bay_slots = vec![
+            vec![SlotLot { name: "Starter Ore".into(), runs: vec![(ItemType::Ore, 70, 0)] }],
+            vec![SlotLot { name: "Starter Ore".into(), runs: vec![(ItemType::Ore, 50, 0)] }],
         ];
         let mut g = Game {
             round: 0,
             credits: STARTING_CREDITS,
-            phase: GamePhase::Build,
+            phase: GamePhase::Supply,
             board,
             hand: starting_hand(),
             offers: Vec::new(),
             directives: Vec::new(),
             contracts: Vec::new(),
+            contract_offers: Vec::new(),
             lot_offers: Vec::new(),
-            bay_queues,
+            bay_slots,
             carry: Vec::new(),
             shifts_used: 0,
             round_delivered: 0,
@@ -228,8 +266,17 @@ impl Game {
             seed,
         };
         g.roll_conditions(0);
-        g.take_snapshot();
+        g.lot_offers = (0..3).map(|_| roll_lot(0, &[], &mut g.rng)).collect();
         g
+    }
+
+    /// Does the run hold a contract of this kind (any instance)?
+    pub fn has_contract(&self, id: ContractId) -> bool {
+        self.contracts.iter().any(|c| c.id == id)
+    }
+
+    fn contract_ids(&self) -> Vec<ContractId> {
+        self.contracts.iter().map(|c| c.id).collect()
     }
 
     /// The bays, in board order — queue index i belongs to the i-th bay.
@@ -242,8 +289,9 @@ impl Game {
             credits: self.credits,
             board: self.board.clone(),
             hand: self.hand.clone(),
-            bay_queues: self.bay_queues.clone(),
+            bay_slots: self.bay_slots.clone(),
             carry: self.carry.clone(),
+            contracts: self.contracts.clone(),
         });
     }
 
@@ -274,8 +322,18 @@ impl Game {
         QUOTAS[self.round]
     }
 
+    /// Every cell a placement covers, shape-expanded.
+    pub fn cells_of(p: &Placement) -> Vec<(i32, i32)> {
+        shape_cells(p.m, p.x, p.y, p.d.unwrap_or(Dir::E))
+    }
+
     fn occupied(&self, x: i32, y: i32) -> bool {
-        self.board.iter().any(|p| p.x == x && p.y == y)
+        self.board.iter().any(|p| Self::cells_of(p).contains(&(x, y)))
+    }
+
+    /// Index of the placement covering (x, y), if any.
+    fn placement_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.board.iter().position(|p| Self::cells_of(p).contains(&(x, y)))
     }
 
     fn in_bounds(x: i32, y: i32) -> bool {
@@ -340,8 +398,11 @@ impl Game {
             return Err("not in build phase".into());
         }
         let card = *self.hand.get(hand_idx).ok_or("no such card in hand")?;
-        if !Self::in_bounds(x, y) || self.occupied(x, y) {
-            return Err(format!("tile {},{} unavailable", x, y));
+        let probe = Placement::new(x, y, card.machine, d);
+        for (cx, cy) in Self::cells_of(&probe) {
+            if !Self::in_bounds(cx, cy) || self.occupied(cx, cy) {
+                return Err(format!("tile {cx},{cy} unavailable"));
+            }
         }
         self.hand.remove(hand_idx);
         let mut p = Placement::new(x, y, card.machine, d);
@@ -358,11 +419,8 @@ impl Game {
             return Err("not in build phase".into());
         }
         let i = self
-            .board
-            .iter()
-            .position(|p| {
-                p.x == x && p.y == y && !matches!(p.m, MachineId::Vault | MachineId::Bay)
-            })
+            .placement_at(x, y)
+            .filter(|&i| !matches!(self.board[i].m, MachineId::Vault | MachineId::Bay))
             .ok_or("nothing sellable there")?;
         let m = self.board[i].m;
         if matches!(m, MachineId::Belt | MachineId::Junction | MachineId::Merger | MachineId::Splitter) {
@@ -394,22 +452,40 @@ impl Game {
         if self.phase != GamePhase::Build {
             return Err("not in build phase".into());
         }
-        self.board
-            .iter_mut()
-            .find(|p| p.x == x && p.y == y && !matches!(p.m, MachineId::Vault | MachineId::Bay))
-            .ok_or_else(|| format!("nothing editable at {x},{y}"))
+        let i = self
+            .placement_at(x, y)
+            .filter(|&i| !matches!(self.board[i].m, MachineId::Vault | MachineId::Bay))
+            .ok_or_else(|| format!("nothing editable at {x},{y}"))?;
+        Ok(&mut self.board[i])
     }
 
-    /// Rotate a placed machine's output edge clockwise.
+    /// Rotate a placed machine clockwise: its output edge, and for shaped
+    /// machines the whole body — refused if the rotated body doesn't fit.
     pub fn rotate(&mut self, x: i32, y: i32) -> Result<(), String> {
-        let p = self.board_mut(x, y)?;
-        match p.d {
-            Some(d) => {
-                p.d = Some(d.turn_cw());
-                Ok(())
-            }
-            None => Err("machine has no output edge".into()),
+        if self.phase != GamePhase::Build {
+            return Err("not in build phase".into());
         }
+        let i = self
+            .placement_at(x, y)
+            .filter(|&i| !matches!(self.board[i].m, MachineId::Vault | MachineId::Bay))
+            .ok_or_else(|| format!("nothing editable at {x},{y}"))?;
+        let Some(d) = self.board[i].d else {
+            return Err("machine has no output edge".into());
+        };
+        let mut probe = self.board[i];
+        probe.d = Some(d.turn_cw());
+        for (cx, cy) in Self::cells_of(&probe) {
+            if !Self::in_bounds(cx, cy) {
+                return Err("no room to rotate".into());
+            }
+            if let Some(j) = self.placement_at(cx, cy) {
+                if j != i {
+                    return Err("no room to rotate".into());
+                }
+            }
+        }
+        self.board[i].d = probe.d;
+        Ok(())
     }
 
     /// Rotate the secondary edge (Filter eject, Splitter second output).
@@ -464,25 +540,30 @@ impl Game {
             .iter()
             .enumerate()
             .filter(|(_, p)| {
-                !matches!(p.m, MachineId::Vault | MachineId::Bay) && tiles.contains(&(p.x, p.y))
+                !matches!(p.m, MachineId::Vault | MachineId::Bay)
+                    && Self::cells_of(p).iter().any(|c| tiles.contains(c))
             })
             .map(|(i, _)| i)
             .collect();
         if moving.is_empty() {
             return Err("nothing movable selected".into());
         }
+        let stationary: Vec<(i32, i32)> = self
+            .board
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| !moving.contains(j))
+            .flat_map(|(_, q)| Self::cells_of(q))
+            .collect();
         for &i in &moving {
-            let (nx, ny) = (self.board[i].x + dx, self.board[i].y + dy);
-            if !Self::in_bounds(nx, ny) {
-                return Err(format!("move would leave the board at {nx},{ny}"));
-            }
-            let blocked = self
-                .board
-                .iter()
-                .enumerate()
-                .any(|(j, q)| !moving.contains(&j) && q.x == nx && q.y == ny);
-            if blocked {
-                return Err(format!("tile {nx},{ny} is occupied"));
+            for (cx, cy) in Self::cells_of(&self.board[i]) {
+                let (nx, ny) = (cx + dx, cy + dy);
+                if !Self::in_bounds(nx, ny) {
+                    return Err(format!("move would leave the board at {nx},{ny}"));
+                }
+                if stationary.contains(&(nx, ny)) {
+                    return Err(format!("tile {nx},{ny} is occupied"));
+                }
             }
         }
         for i in moving {
@@ -494,7 +575,7 @@ impl Game {
 
     /// How long this run's shifts are (contracts can stretch them).
     pub fn shift_ticks(&self) -> u32 {
-        SHIFT_TICKS + if self.contracts.contains(&ContractId::NightShifts) { 8 } else { 0 }
+        SHIFT_TICKS + if self.has_contract(ContractId::NightShifts) { 8 } else { 0 }
     }
 
     /// The shift as a steppable sim — same board, seed, carry, queues,
@@ -504,25 +585,27 @@ impl Game {
         let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
         // the warm factory: whatever was in the pipes is still in the pipes
         sim.seed_items(&self.carry);
-        // bay queues stream from the docks, in order
-        for ((x, y), queue) in self.bays().into_iter().zip(&self.bay_queues) {
+        // bay slots stream from the docks, slot by slot, run by run
+        for ((x, y), slots) in self.bays().into_iter().zip(&self.bay_slots) {
             let mut seeds = Vec::new();
-            for &(ty, count, quality) in queue {
-                for _ in 0..count {
-                    seeds.push(SeedItem { x, y, buffered: true, ty, quality });
+            for lot in slots {
+                for &(ty, count, quality) in &lot.runs {
+                    for _ in 0..count {
+                        seeds.push(SeedItem { x, y, buffered: true, ty, quality });
+                    }
                 }
             }
             sim.seed_items(&seeds);
         }
         sim.apply_directives(&self.directives);
         sim.set_demand(self.market, MARKET_MULT);
-        if self.contracts.contains(&ContractId::GearSyndicate) {
+        if self.has_contract(ContractId::GearSyndicate) {
             sim.set_demand(ItemType::Gear, 1.5);
         }
-        sim.purist = self.contracts.contains(&ContractId::PuristClause);
-        sim.sap_decay = !self.contracts.contains(&ContractId::SweetTooth);
-        sim.crystal_crack = !self.contracts.contains(&ContractId::GentleHands);
-        if self.contracts.contains(&ContractId::FluxInjector) {
+        sim.purist = self.has_contract(ContractId::PuristClause);
+        sim.sap_decay = !self.has_contract(ContractId::SweetTooth);
+        sim.crystal_crack = !self.has_contract(ContractId::GentleHands);
+        if self.has_contract(ContractId::FluxInjector) {
             sim.flux_bonus = 3;
         }
         if let Some(tag) = self.audit_tag {
@@ -558,26 +641,35 @@ impl Game {
         let mut sim = self.shift_sim()?;
         let result = sim.run(self.shift_ticks());
 
-        // Capture the warm state: bay leftovers go back to their queues,
-        // everything else carries as loose material.
+        // Capture the warm state: bay leftovers re-form as a single
+        // "Remnants" consignment per bay, everything else carries loose.
         let bays = self.bays();
         let mut carry = Vec::new();
-        for q in self.bay_queues.iter_mut() {
-            q.clear();
-        }
+        let mut remnants: Vec<Vec<(ItemType, u32, i32)>> = vec![Vec::new(); bays.len()];
         for seed in sim.export_state() {
             match bays.iter().position(|&(bx, by)| (bx, by) == (seed.x, seed.y)) {
-                Some(b) if seed.buffered => {
-                    // compress runs of identical items back into queue form
-                    match self.bay_queues[b].last_mut() {
-                        Some(e) if e.0 == seed.ty && e.2 == seed.quality => e.1 += 1,
-                        _ => self.bay_queues[b].push((seed.ty, 1, seed.quality)),
-                    }
-                }
+                Some(b) if seed.buffered => match remnants[b].last_mut() {
+                    Some(e) if e.0 == seed.ty && e.2 == seed.quality => e.1 += 1,
+                    _ => remnants[b].push((seed.ty, 1, seed.quality)),
+                },
                 _ => carry.push(seed),
             }
         }
         self.carry = carry;
+        for (b, runs) in remnants.into_iter().enumerate() {
+            self.bay_slots[b] = if runs.is_empty() {
+                Vec::new()
+            } else {
+                vec![SlotLot { name: "Remnants".into(), runs }]
+            };
+        }
+
+        // Term contracts count this shift's deliveries toward their targets.
+        for c in self.contracts.iter_mut() {
+            if let ContractKind::Term { deliver, .. } = contract(c.id).kind {
+                c.progress += result.delivered.iter().filter(|d| d.ty == deliver).count() as u32;
+            }
+        }
 
         self.shifts_used += 1;
         self.round_delivered += result.payout;
@@ -594,8 +686,8 @@ impl Game {
                 self.phase = GamePhase::Over { won: true };
             } else {
                 self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
-                self.lot_offers = (0..3)
-                    .map(|_| roll_lot(self.round + 1, &self.contracts, &mut self.rng))
+                self.contract_offers = (0..2)
+                    .map(|_| CONTRACT_POOL[self.rng.below(CONTRACT_POOL.len())])
                     .collect();
                 self.rerolls = 0;
                 self.roll_conditions(self.round + 1);
@@ -619,32 +711,65 @@ impl Game {
         self.credits = snap.credits;
         self.board = snap.board;
         self.hand = snap.hand;
-        self.bay_queues = snap.bay_queues;
+        self.bay_slots = snap.bay_slots;
         self.carry = snap.carry;
+        self.contracts = snap.contracts;
         self.shifts_used = 0;
         self.round_delivered = 0;
         self.phase = GamePhase::Build;
         Ok(())
     }
 
-    /// Buy the shipment at `lot_idx`, queueing it at bay `bay_idx`. The bay
-    /// choice IS the input decision: what arrives where, in what order.
+    /// Buy the shipment at `lot_idx` into a free slot of bay `bay_idx`. The
+    /// slot choice IS the input decision: what arrives where, in what order.
     pub fn buy_lot(&mut self, lot_idx: usize, bay_idx: usize) -> Result<(), String> {
-        if self.phase != GamePhase::Shop {
-            return Err("the shop is closed".into());
+        if self.phase != GamePhase::Supply {
+            return Err("the supply window is closed".into());
         }
         let lot = self.lot_offers.get(lot_idx).ok_or("no such shipment")?.clone();
-        if bay_idx >= self.bay_queues.len() {
+        if bay_idx >= self.bay_slots.len() {
             return Err("no such bay".into());
+        }
+        if self.bay_slots[bay_idx].len() >= BAY_SLOTS {
+            return Err("that bay's slots are full".into());
         }
         if self.credits < lot.price {
             return Err("cannot afford that shipment".into());
         }
         self.credits -= lot.price;
         self.lot_offers.remove(lot_idx);
-        for (ty, count) in lot.entries {
-            self.bay_queues[bay_idx].push((ty, count, lot.quality));
+        self.bay_slots[bay_idx].push(SlotLot {
+            name: lot.name.into(),
+            runs: lot.entries.iter().map(|&(ty, n)| (ty, n, lot.quality)).collect(),
+        });
+        Ok(())
+    }
+
+    /// Buy the contract on offer at `idx` — it takes effect immediately.
+    pub fn buy_contract(&mut self, idx: usize) -> Result<(), String> {
+        if self.phase != GamePhase::Shop {
+            return Err("the shop is closed".into());
         }
+        let id = *self.contract_offers.get(idx).ok_or("no such contract")?;
+        let price = priced(contract(id).cost, self.round);
+        if self.credits < price {
+            return Err("cannot afford that contract".into());
+        }
+        self.credits -= price;
+        self.contract_offers.remove(idx);
+        self.contracts.push(ContractInst::new(id));
+        Ok(())
+    }
+
+    /// Sell an owned contract back for half its current price. Term deals
+    /// can be dumped before they lapse; ongoing ones give up their boost.
+    pub fn sell_contract(&mut self, idx: usize) -> Result<(), String> {
+        if matches!(self.phase, GamePhase::Over { .. }) {
+            return Err("run is over".into());
+        }
+        let inst = *self.contracts.get(idx).ok_or("no such contract")?;
+        self.contracts.remove(idx);
+        self.credits += priced(contract(inst.id).cost, self.round) / 2;
         Ok(())
     }
 
@@ -669,15 +794,16 @@ impl Game {
         match offer {
             Offer::Machine(c) => self.hand.push(c),
             Offer::Directive(d) => self.directives.push(d),
-            Offer::Contract(c) => self.contracts.push(c),
+            Offer::Contract(c) => self.contracts.push(ContractInst::new(c)),
         }
         Ok(())
     }
 
-    /// Swap the rack for a fresh one. Each reroll in the same shop costs more.
+    /// Swap the current offers for fresh ones (works in the shop AND the
+    /// supply window). Each reroll in the same visit costs more.
     pub fn shop_reroll(&mut self) -> Result<(), String> {
-        if self.phase != GamePhase::Shop {
-            return Err("the shop is closed".into());
+        if !matches!(self.phase, GamePhase::Shop | GamePhase::Supply) {
+            return Err("nothing to reroll".into());
         }
         let price = self.reroll_price();
         if self.credits < price {
@@ -685,22 +811,87 @@ impl Game {
         }
         self.credits -= price;
         self.rerolls += 1;
-        self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
-        self.lot_offers =
-            (0..3).map(|_| roll_lot(self.round + 1, &self.contracts, &mut self.rng)).collect();
+        match self.phase {
+            GamePhase::Shop => {
+                self.offers = shop_rack(&self.unlocked, SHOP_SIZE, &mut self.rng);
+                self.contract_offers = (0..2)
+                    .map(|_| CONTRACT_POOL[self.rng.below(CONTRACT_POOL.len())])
+                    .collect();
+            }
+            GamePhase::Supply => {
+                let ids = self.contract_ids();
+                self.lot_offers =
+                    (0..3).map(|_| roll_lot(self.round, &ids, &mut self.rng)).collect();
+            }
+            _ => {}
+        }
         Ok(())
     }
 
-    /// Leave the shop and start the next round.
+    /// Leave the shop: term contracts settle (fulfil → reward, lapse →
+    /// gone), the round advances, and the supply window opens.
     pub fn shop_done(&mut self) -> Result<(), String> {
         if self.phase != GamePhase::Shop {
             return Err("the shop is closed".into());
         }
         self.offers.clear();
-        self.lot_offers.clear();
+        self.contract_offers.clear();
+        // settle term contracts at the round boundary
+        let mut reward_total = 0u32;
+        self.contracts.retain_mut(|c| {
+            let ContractKind::Term { count, reward, .. } = contract(c.id).kind else {
+                return true;
+            };
+            if c.progress >= count {
+                reward_total += reward;
+                return false; // fulfilled and paid
+            }
+            let left = c.rounds_left.unwrap_or(0);
+            if left <= 1 {
+                return false; // lapsed
+            }
+            c.rounds_left = Some(left - 1);
+            true
+        });
+        self.credits += reward_total;
+
         self.round += 1;
         self.shifts_used = 0;
         self.round_delivered = 0;
+        self.enter_supply();
+        Ok(())
+    }
+
+    /// Open the supply window: roll consignment offers, apply the contracts
+    /// that grant free inputs.
+    fn enter_supply(&mut self) {
+        let ids = self.contract_ids();
+        self.lot_offers = (0..3).map(|_| roll_lot(self.round, &ids, &mut self.rng)).collect();
+        if self.has_contract(ContractId::OreRetainer) {
+            if let Some(slots) = self.bay_slots.iter_mut().find(|s| s.len() < BAY_SLOTS) {
+                slots.push(SlotLot {
+                    name: "Retainer Ore".into(),
+                    runs: vec![(ItemType::Ore, 30, 0)],
+                });
+            }
+        }
+        if self.has_contract(ContractId::Prospector) && self.rng.next_f64() < 0.5 {
+            if let Some(slots) = self.bay_slots.iter_mut().find(|s| s.len() < BAY_SLOTS) {
+                slots.push(SlotLot {
+                    name: "Prospector Crystal".into(),
+                    runs: vec![(ItemType::Crystal, 10, 2)],
+                });
+            }
+        }
+        self.phase = GamePhase::Supply;
+    }
+
+    /// Close the supply window and take the floor.
+    pub fn supply_done(&mut self) -> Result<(), String> {
+        if self.phase != GamePhase::Supply {
+            return Err("the supply window is closed".into());
+        }
+        self.lot_offers.clear();
         self.phase = GamePhase::Build;
         self.take_snapshot();
         Ok(())

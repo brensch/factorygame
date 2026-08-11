@@ -101,8 +101,10 @@ test("the shipped wasm plays a consignment round over the ABI", async () => {
   expect(one.state.shiftsUsed).toBe(1);
   expect(one.state.roundDelivered).toBeGreaterThan(0);
   expect(one.state.carry).toBeGreaterThan(0); // warm factory
-  expect(one.state.bays[0].slots.length).toBe(0); // the cards are SPENT
-  expect(one.state.bays[0].hopper).toBeGreaterThan(0); // material persists
+  const slot0 = one.state.bays[0].slots[0];
+  expect(slot0.left).toBeLessThan(slot0.size); // the lot drains in place
+  expect(slot0.left).toBeGreaterThan(0);
+  expect(one.state.supplyHand.length).toBeGreaterThanOrEqual(2); // redealt
   expect(one.sawVaultHop).toBe(true);
 
   const two = runShift();

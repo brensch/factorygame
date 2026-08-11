@@ -20,8 +20,8 @@ interface OwnedDirective { d: string; name: string; tag: string; n: number }
 interface Term { item: string; need: number; progress?: number; rounds?: number; roundsLeft?: number; reward: number }
 interface OwnedContract { c: string; name: string; price: number; term: Term | null }
 interface ContractOffer { c: string; name: string; price: number; blurb: string; term: Term | null }
-interface SlotLot { name: string; runs: { t: string; n: number; q: number }[] }
-interface BayState { x: number; y: number; total: number; hopper: number; slotMax: number; slots: SlotLot[] }
+interface SlotLot { name: string; left: number; size: number; runs: { t: string; n: number; q: number }[] }
+interface BayState { x: number; y: number; total: number; slotMax: number; slots: SlotLot[] }
 interface LotOffer { name: string; price: number; q: number; entries: { t: string; n: number }[] }
 interface Pl {
   x: number; y: number; m: string; kind: string;
@@ -173,6 +173,8 @@ const ITEM_COLOR: Record<string, string> = {
 // ── client state: what the player is doing, never what the game is ───────────
 type Infra = "belt" | "junction" | "merger" | "splitter" | "chute";
 type Tool = { kind: Infra } | { kind: "card"; idx: number };
+
+const SHIFT_NAMES = ["MORNING", "AFTERNOON", "NIGHT"];
 
 const TAG_COLOR: Record<string, string> = {
   heat: "#e8623c", kinetic: "#f0a63a", volt: "#8b7bf0",
@@ -348,14 +350,21 @@ function draw() {
       ctx.fillText("BAY", cx, cy - TILE * 0.2);
       ctx.fillStyle = "#f0a63a";
       ctx.fillText(String(bay?.total ?? 0), cx, cy + TILE * 0.02);
-      // the slot rack: one pip per slot, filled when a card sits in it
+      // the slot rack: one bar per slot, draining as its lot streams out
       if (bay) {
         const pipw = (TILE - 12) / bay.slotMax;
         for (let k = 0; k < bay.slotMax; k++) {
-          ctx.fillStyle = k < bay.slots.length ? "#e8c86a" : "#12161d";
+          const px = c.x * TILE + 6 + k * pipw + 1;
+          const py = c.y * TILE + TILE - 13;
+          ctx.fillStyle = "#12161d";
+          ctx.fillRect(px, py, pipw - 2, 6);
+          const lot = bay.slots[k];
+          if (lot && lot.size > 0) {
+            ctx.fillStyle = "#e8c86a";
+            ctx.fillRect(px, py, (pipw - 2) * (lot.left / lot.size), 6);
+          }
           ctx.strokeStyle = "#0b0e13";
-          ctx.fillRect(c.x * TILE + 6 + k * pipw + 1, c.y * TILE + TILE - 13, pipw - 2, 6);
-          ctx.strokeRect(c.x * TILE + 6 + k * pipw + 1, c.y * TILE + TILE - 13, pipw - 2, 6);
+          ctx.strokeRect(px, py, pipw - 2, 6);
         }
       }
       for (const f of outs) portOut(c.x, c.y, f.d, f.status, f.secondary);
@@ -910,16 +919,18 @@ function paintInspector() {
     const bi = G.bays.findIndex((b) => b.x === c.x && b.y === c.y);
     const bay = G.bays[bi];
     body.innerHTML =
-      `<div class="kv"><span>Hopper</span><b>⏳${bay.hopper}</b></div>` +
       bay.slots.map((lot, k) => {
         const chips = lot.runs
           .map((r) => `<span class="ichip"><i style="background:${ITEM_COLOR[r.t] ?? "#fff"}"></i>${r.n}</span>`)
           .join(" ");
-        return `<div class="kv" style="margin-top:5px"><span>${k + 1}. <b>${lot.name}</b> ${chips}</span>
+        const pct = lot.size ? Math.round((lot.left / lot.size) * 100) : 0;
+        return `<div class="kv" style="margin-top:5px"><span>${k + 1}. <b>${lot.name}</b> ${chips}
+            <span style="color:var(--ink-muted)">${lot.left}/${lot.size}</span></span>
           <span>
             <button data-up="${k}" style="width:26px"${k === 0 ? " disabled" : ""}>↑</button>
             <button data-eject="${k}" style="width:26px">⏏</button>
-          </span></div>`;
+          </span></div>
+          <div class="slotbar"><i style="width:${pct}%"></i></div>`;
       }).join("") +
       (bay.slots.length === 0 ? `<div class="kv" style="margin-top:5px;color:var(--ink-muted)">drag supply cards here</div>` : "");
     body.querySelectorAll<HTMLElement>("[data-up]").forEach((el) => {
@@ -976,7 +987,7 @@ function meter(value: number) {
 function paintHeader() {
   const g = (id: string) => document.getElementById(id) as HTMLElement;
   g("hRound").textContent = `${G.round + 1}/12`;
-  g("hTick").textContent = ui.animating ? `t${ui.tick}` : "";
+  g("hTick").textContent = "";
   g("hCred").textContent = String(G.credits);
   g("hQuota").textContent = G.quota.toLocaleString();
   // The meter is what you've BANKED this round; during a shift it climbs
@@ -984,9 +995,15 @@ function paintHeader() {
   meter(G.roundDelivered + (ui.animating ? ui.payout : 0));
   const pips = Array.from({ length: G.shiftsMax }, (_, i) =>
     i < G.shiftsUsed + (ui.animating ? 1 : 0) ? "●" : "○").join("");
-  const hints: string[] = [pips];
+  const shiftName = SHIFT_NAMES[Math.min(G.shiftsUsed, 2)];
+  const hints: string[] = [`${shiftName} ${pips}`];
   if (G.carry > 0) hints.push(`⏳${G.carry}`);
   (document.getElementById("meterHints") as HTMLElement).textContent = hints.join(" ");
+  // the shift clock: fills as the ticks burn
+  const tb = document.getElementById("timeBar") as HTMLElement;
+  tb.style.width = ui.animating ? `${(ui.tick / G.shiftLen) * 100}%` : "0%";
+  (document.getElementById("bRun") as HTMLElement).textContent =
+    `▶ ${SHIFT_NAMES[Math.min(G.shiftsUsed, 2)]}`;
   g("marketChip").innerHTML =
     `<span class="dot" style="background:${ITEM_COLOR[G.market] ?? "#fff"}"></span>` +
     `<b>${capName(G.market)}</b> ×${G.marketMult}`;
@@ -1336,23 +1353,26 @@ function endShift() {
   paintAll();
 }
 
-/** Mid-round: the shift banked something, more shifts remain. */
+/** Mid-day: the shift banked something, more shifts remain. */
 function shiftReport() {
   const o = G.last!;
   const left = G.shiftsMax - G.shiftsUsed;
+  const done = SHIFT_NAMES[G.shiftsUsed - 1].toLowerCase();
+  const next = SHIFT_NAMES[Math.min(G.shiftsUsed, 2)].toLowerCase();
   modal(
-    `<h3>Shift ${G.shiftsUsed}/${G.shiftsMax}</h3>
+    `<h3>${done[0].toUpperCase() + done.slice(1)} shift over</h3>
      <div class="big" style="color:${G.roundDelivered >= G.quota ? "var(--vault)" : "var(--extractor)"}">
        ${G.roundDelivered.toLocaleString()}
        <span style="font-size:15px;color:var(--ink-muted)">/ ${G.quota.toLocaleString()}
        · +${o.payout.toLocaleString()} this shift</span></div>
      <div class="stripe">
-       <span class="chip"><i>LEFT</i> <b>${"●".repeat(left)}${"○".repeat(G.shiftsUsed)}</b></span>
+       <span class="chip"><i>SHIFTS LEFT</i> <b>${"●".repeat(left)}${"○".repeat(G.shiftsUsed)}</b></span>
        <span class="chip"><i>PIPES</i> <b>⏳${G.carry}</b></span>
        <span class="chip gold">◈ <b>${G.credits}</b></span>
      </div>
-     <p style="font-size:12.5px">Rearrange anything, then run again — the factory stays warm.</p>
-     <button class="go" id="continue" style="width:100%">Back to the floor</button>`,
+     <p style="font-size:12.5px">Fresh consignments dealt. Rearrange anything —
+       the floor stays warm until the day ends.</p>
+     <button class="go" id="continue" style="width:100%">▶ ${next[0].toUpperCase() + next.slice(1)} shift</button>`,
   );
   (document.getElementById("continue") as HTMLElement).onclick = () => {
     closeModal();
@@ -1372,7 +1392,7 @@ function closeModal() { document.getElementById("modal")!.classList.remove("on")
  *  the bays. Buying picks the bay; each bay holds a limited slot rack. */
 function openSupply() {
   modal(
-    `<h3>Supply — round ${G.round + 1}</h3>
+    `<h3>Morning supply — day ${G.round + 1}</h3>
      <div class="stripe">
        <span class="chip gold">◈ <b>${G.credits}</b></span>
        <span class="chip"><i>QUOTA</i> <b>${G.quota.toLocaleString()}</b></span>
@@ -1426,7 +1446,7 @@ function openShop() {
   const termLine = (t: Term | null) =>
     t ? `<div class="ds" style="color:var(--extractor)">deliver ${t.need}× ${capName(t.item)} in ${t.rounds ?? t.roundsLeft}r → ◈${t.reward}</div>` : "";
   modal(
-    `<h3>Round ${G.round + 1} cleared</h3>
+    `<h3>Day ${G.round + 1} cleared</h3>
      <div class="big" style="color:var(--vault)">${G.roundDelivered.toLocaleString()}
        <span style="font-size:15px;color:var(--ink-muted)">/ ${o.quota.toLocaleString()}${
          G.carry ? ` · ⏳${G.carry} in the pipes` : ""}</span></div>
@@ -1471,7 +1491,7 @@ function openShop() {
      }).join("")}</div>
      <div class="row">
        <button id="reroll"${G.credits >= G.rerollPrice ? "" : " disabled"}>↻ Reroll ◈${G.rerollPrice}</button>
-       <button class="go" id="shopDone">▶ Supply run</button>
+       <button class="go" id="shopDone">▶ Next day</button>
      </div>
      ${full ? `<p style="margin:10px 0 0;font-size:12px">Hand full — right-click a hand card to sell it.</p>` : ""}`,
   );

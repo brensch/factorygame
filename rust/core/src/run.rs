@@ -171,11 +171,24 @@ pub enum GamePhase {
 }
 
 /// A consignment sitting in a bay slot: a name and runs of (type, count,
-/// quality), streamed in order.
+/// quality), streamed in order. `size` is what it held when fresh — the
+/// runs deplete in place as shifts drain it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SlotLot {
     pub name: String,
     pub runs: Vec<(ItemType, u32, i32)>,
+    pub size: u32,
+}
+
+impl SlotLot {
+    pub fn new(name: String, runs: Vec<(ItemType, u32, i32)>) -> Self {
+        let size = runs.iter().map(|r| r.1).sum();
+        Self { name, runs, size }
+    }
+
+    pub fn remaining(&self) -> u32 {
+        self.runs.iter().map(|r| r.1).sum()
+    }
 }
 
 /// An owned contract: the deal, plus term-tracking when it isn't ongoing.
@@ -229,9 +242,7 @@ pub struct Game {
     /// Each bay's slots: up to [`BAY_SLOTS`] allocated cards, streamed in
     /// order and CONSUMED by running a shift.
     pub bay_slots: Vec<Vec<SlotLot>>,
-    /// Items that physically streamed into a bay but weren't processed —
-    /// they persist (warm), but their card is already spent.
-    pub bay_hoppers: Vec<Vec<(ItemType, u32, i32)>>,
+
     /// Items still on the board between shifts — the warm factory.
     pub carry: Vec<SeedItem>,
     /// Shifts spent on the current round, of [`SHIFTS_PER_ROUND`].
@@ -262,7 +273,6 @@ struct Snapshot {
     hand: Vec<Card>,
     supply_hand: Vec<SlotLot>,
     bay_slots: Vec<Vec<SlotLot>>,
-    bay_hoppers: Vec<Vec<(ItemType, u32, i32)>>,
     carry: Vec<SeedItem>,
     contracts: Vec<ContractInst>,
 }
@@ -290,7 +300,6 @@ impl Game {
             lot_offers: Vec::new(),
             supply_hand: Vec::new(),
             bay_slots,
-            bay_hoppers: vec![Vec::new(), Vec::new()],
             carry: Vec::new(),
             shifts_used: 0,
             round_delivered: 0,
@@ -322,23 +331,19 @@ impl Game {
                 } else {
                     roll_basic_lot(self.round, &ids, &mut self.rng)
                 };
-                self.supply_hand.push(SlotLot {
-                    name: lot.name.into(),
-                    runs: lot.entries.iter().map(|&(t, n)| (t, n, lot.quality)).collect(),
-                });
+                self.supply_hand.push(SlotLot::new(
+                    lot.name.into(),
+                    lot.entries.iter().map(|&(t, n)| (t, n, lot.quality)).collect(),
+                ));
             }
         }
         if self.has_contract(ContractId::OreRetainer) {
-            self.supply_hand.push(SlotLot {
-                name: "Retainer Ore".into(),
-                runs: vec![(ItemType::Ore, 30, 0)],
-            });
+            self.supply_hand
+                .push(SlotLot::new("Retainer Ore".into(), vec![(ItemType::Ore, 30, 0)]));
         }
         if self.has_contract(ContractId::Prospector) && self.rng.next_f64() < 0.5 {
-            self.supply_hand.push(SlotLot {
-                name: "Prospector Crystal".into(),
-                runs: vec![(ItemType::Crystal, 10, 2)],
-            });
+            self.supply_hand
+                .push(SlotLot::new("Prospector Crystal".into(), vec![(ItemType::Crystal, 10, 2)]));
         }
     }
 
@@ -410,7 +415,6 @@ impl Game {
             hand: self.hand.clone(),
             supply_hand: self.supply_hand.clone(),
             bay_slots: self.bay_slots.clone(),
-            bay_hoppers: self.bay_hoppers.clone(),
             carry: self.carry.clone(),
             contracts: self.contracts.clone(),
         });
@@ -706,15 +710,9 @@ impl Game {
         let mut sim = Sim::new(BOARD_W, BOARD_H, &self.board, self.shift_seed())?;
         // the warm factory: whatever was in the pipes is still in the pipes
         sim.seed_items(&self.carry);
-        // each bay streams its hopper (already-delivered material) first,
-        // then this round's slotted cards, in slot order
+        // each bay streams its slot rack in order
         for (b, (x, y)) in self.bays().into_iter().enumerate() {
             let mut seeds = Vec::new();
-            for &(ty, count, quality) in &self.bay_hoppers[b] {
-                for _ in 0..count {
-                    seeds.push(SeedItem { x, y, buffered: true, ty, quality });
-                }
-            }
             for lot in &self.bay_slots[b] {
                 for &(ty, count, quality) in &lot.runs {
                     for _ in 0..count {
@@ -768,25 +766,41 @@ impl Game {
         let mut sim = self.shift_sim()?;
         let result = sim.run(self.shift_ticks());
 
-        // The cards are spent: slotted consignments dissolved into the
-        // stream when the shift ran. Whatever physically remains in a bay
-        // becomes hopper material (warm, but card-less).
+        // Deplete the slotted lots in place: leftover bay items (still in
+        // FIFO order) are re-sliced back into their original lots, so a
+        // half-drained "Bulk Ore 41/55" keeps sitting in its slot, visible
+        // and movable, until it runs dry.
         let bays = self.bays();
         let mut carry = Vec::new();
-        let mut hoppers: Vec<Vec<(ItemType, u32, i32)>> = vec![Vec::new(); bays.len()];
+        let mut leftovers: Vec<Vec<(ItemType, i32)>> = vec![Vec::new(); bays.len()];
         for seed in sim.export_state() {
             match bays.iter().position(|&(bx, by)| (bx, by) == (seed.x, seed.y)) {
-                Some(b) if seed.buffered => match hoppers[b].last_mut() {
-                    Some(e) if e.0 == seed.ty && e.2 == seed.quality => e.1 += 1,
-                    _ => hoppers[b].push((seed.ty, 1, seed.quality)),
-                },
+                Some(b) if seed.buffered => leftovers[b].push((seed.ty, seed.quality)),
                 _ => carry.push(seed),
             }
         }
         self.carry = carry;
-        self.bay_hoppers = hoppers;
-        for slots in self.bay_slots.iter_mut() {
-            slots.clear();
+        for (b, mut items) in leftovers.into_iter().enumerate() {
+            // items stream from the FRONT, so the leftovers belong to the
+            // TAIL of the rack: walk lots from the back, refilling
+            let mut rebuilt: Vec<SlotLot> = Vec::new();
+            for lot in self.bay_slots[b].iter().rev() {
+                let take = (lot.remaining() as usize).min(items.len());
+                if take == 0 {
+                    continue;
+                }
+                let tail = items.split_off(items.len() - take);
+                let mut runs: Vec<(ItemType, u32, i32)> = Vec::new();
+                for (ty, q) in tail {
+                    match runs.last_mut() {
+                        Some(r) if r.0 == ty && r.2 == q => r.1 += 1,
+                        _ => runs.push((ty, 1, q)),
+                    }
+                }
+                rebuilt.push(SlotLot { name: lot.name.clone(), runs, size: lot.size });
+            }
+            rebuilt.reverse();
+            self.bay_slots[b] = rebuilt;
         }
 
         // Term contracts count this shift's deliveries toward their targets.
@@ -806,6 +820,13 @@ impl Game {
             let surplus = (self.round_delivered - quota) as u32;
             let spare = SHIFTS_PER_ROUND - self.shifts_used;
             self.credits += surplus + spare * (quota as u32 / 10);
+            // the day is over: the floor is swept — leftover material in
+            // bays and pipes doesn't survive the night
+            self.carry.clear();
+            self.supply_hand.clear();
+            for slots in self.bay_slots.iter_mut() {
+                slots.clear();
+            }
             // round_delivered stays visible through the shop; shop_done resets
             if self.round + 1 >= QUOTAS.len() {
                 self.phase = GamePhase::Over { won: true };
@@ -820,8 +841,10 @@ impl Game {
             }
         } else if self.shifts_used >= SHIFTS_PER_ROUND {
             self.phase = GamePhase::Over { won: false };
+        } else {
+            // the next shift's consignments are dealt fresh
+            self.deal_supply();
         }
-        // else: still Build — rearrange and run the next shift
         Ok(self.history.last().unwrap())
     }
 
@@ -838,7 +861,6 @@ impl Game {
         self.hand = snap.hand;
         self.supply_hand = snap.supply_hand;
         self.bay_slots = snap.bay_slots;
-        self.bay_hoppers = snap.bay_hoppers;
         self.carry = snap.carry;
         self.contracts = snap.contracts;
         self.shifts_used = 0;
@@ -859,10 +881,10 @@ impl Game {
         }
         self.credits -= lot.price;
         self.lot_offers.remove(lot_idx);
-        self.supply_hand.push(SlotLot {
-            name: lot.name.into(),
-            runs: lot.entries.iter().map(|&(ty, n)| (ty, n, lot.quality)).collect(),
-        });
+        self.supply_hand.push(SlotLot::new(
+            lot.name.into(),
+            lot.entries.iter().map(|&(ty, n)| (ty, n, lot.quality)).collect(),
+        ));
         Ok(())
     }
 

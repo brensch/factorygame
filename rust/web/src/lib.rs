@@ -659,7 +659,8 @@ fn push_card(out: &mut String, c: Card) {
 fn push_slotlot(s: &mut String, lot: &overflow_core::run::SlotLot) {
     s.push_str("{\"name\":\"");
     push_escaped(s, &lot.name);
-    s.push_str("\",\"runs\":[");
+    let _ = write!(s, "\",\"left\":{},\"size\":{},", lot.remaining(), lot.size);
+    s.push_str("\"runs\":[");
     for (k, &(ty, count, quality)) in lot.runs.iter().enumerate() {
         if k > 0 {
             s.push(',');
@@ -811,12 +812,10 @@ fn state_json(g: &Game, err: Option<&str>) -> String {
         if i > 0 {
             s.push(',');
         }
-        let hopper: u32 = g.bay_hoppers[i].iter().map(|e| e.1).sum();
-        let slotted: u32 = slots.iter().flat_map(|l| l.runs.iter()).map(|e| e.1).sum();
+        let slotted: u32 = slots.iter().map(|l| l.remaining()).sum();
         let _ = write!(
             s,
-            "{{\"x\":{bx},\"y\":{by},\"hopper\":{hopper},\"total\":{},\"slotMax\":{},\"slots\":[",
-            hopper + slotted,
+            "{{\"x\":{bx},\"y\":{by},\"total\":{slotted},\"slotMax\":{},\"slots\":[",
             overflow_core::run::BAY_SLOTS
         );
         for (j, lot) in slots.iter().enumerate() {

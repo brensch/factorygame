@@ -175,6 +175,20 @@ and outputs." Extractors are gone. The factory is a processor now.
   mode at 3 — the healthiest curve yet, and the bot now has to discard
   non-ore cards it can't route, same as a filterless player.
 
+## v3.3 (2026-08-11) — the work day
+
+- Rounds are **days**; shifts are **Morning, Afternoon, Night**. Fresh
+  consignments are dealt before every shift, not once a round.
+- **Lots deplete in place**: a slotted "Bulk Ore 41/55" stays in its slot —
+  visible, movable, reorderable — until drained. The anonymous hopper
+  counter is gone (leftover bay items re-slice back into their lots after
+  each shift, FIFO from the rack's tail).
+- **The day ends, the floor is swept**: when the quota clears, leftover
+  material in bays, pipes and the undealt hand is gone. Use it or lose it,
+  every day.
+- Legibility: an amber shift clock burns under the quota meter, per-slot
+  depletion bars live on the bay tiles, and the run button names the shift.
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

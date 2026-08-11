@@ -315,6 +315,10 @@ fn a_full_scripted_round_1_processes_the_starter_consignment() {
     }
     assert_eq!(g.phase, GamePhase::Shop, "the starter build must clear round 1");
     assert!(shifts >= 2, "one shift should NOT clear round 1 (got {shifts})");
+    // the day ended: the floor was swept
+    assert!(g.carry.is_empty(), "pipes swept at day end");
+    assert!(g.bay_slots.iter().all(|s| s.is_empty()), "racks swept at day end");
+    assert!(g.supply_hand.is_empty(), "undealt cards don't survive the night");
 
     // the shop: equipment (machines + directive) and a contract shelf
     assert_eq!(g.offers.len(), SHOP_SIZE);
@@ -380,12 +384,18 @@ fn the_factory_stays_warm_between_shifts() {
     let mut g = Game::new(42);
     build_starter(&mut g);
     let before = queued(&g);
+    let hand_before = g.supply_hand.len();
     g.run_shift().unwrap();
     assert!(!g.carry.is_empty(), "material still in the pipes after shift 1");
-    assert!(g.bay_slots.iter().all(|s| s.is_empty()), "cards are consumed by the shift");
-    let hopper: u32 = g.bay_hoppers.iter().flatten().map(|e| e.1).sum();
-    assert!(hopper > 0, "unstreamed material persists in the hopper");
-    assert!(hopper < before, "…but some of it streamed");
+    // the lots deplete IN PLACE: still slotted, visibly drained, movable
+    let after = queued(&g);
+    assert!(after > 0, "40 ticks cannot drain both racks");
+    assert!(after < before, "…but the shift drained something: {before} -> {after}");
+    let lot = g.bay_slots.iter().flatten().next().unwrap();
+    assert!(lot.remaining() < lot.size, "the lot shows its depletion");
+    assert!(g.unslot(0, 0).is_ok(), "a half-drained lot is still movable");
+    // and the next shift's consignments were dealt fresh
+    assert!(g.supply_hand.len() > hand_before, "redealt after the shift");
 }
 
 #[test]

@@ -538,19 +538,25 @@ function paintHand() {
   infra("merger", "Merge", "⇒", 4);
   infra("splitter", "Split", "⇉", 4);
 
-  const div = document.createElement("div");
-  div.className = "divider";
-  pal.appendChild(div);
-
+  // the hand: real cards in a centered fan, click to arm, drag to place
+  const fan = document.getElementById("handFan")!;
+  fan.innerHTML = "";
+  const n = G.hand.length;
   G.hand.forEach((card, i) => {
     const el = document.createElement("div");
     const on = ui.tool.kind === "card" && ui.tool.idx === i;
-    el.className = "pi" + (on ? " on" : "");
+    el.className = "pi cardf" + (on ? " on" : "");
+    const off = i - (n - 1) / 2;
+    el.style.setProperty("--fan", `rotate(${off * 3.2}deg) translateY(${Math.abs(off) * 7}px)`);
     el.innerHTML =
       (i < 9 ? `<span class="key">${i + 1}</span>` : "") +
       `<div class="sw" style="background:${CAT[card.kind]}">${SHORT[card.m] || "▸"}</div>` +
       `<div class="nm">${card.name}</div>`;
-    el.onclick = () => { ui.tool = { kind: "card", idx: i }; ui.selected = null; paintAll(); };
+    el.onpointerdown = (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      cardPress(e, i, el, card);
+    };
     el.oncontextmenu = (e) => {
       e.preventDefault();
       const value = Math.floor(Math.round(card.cost * G.priceMult) / 2);
@@ -560,11 +566,56 @@ function paintHand() {
       }
       paintAll();
     };
-    pal.appendChild(el);
+    fan.appendChild(el);
   });
 
   (document.getElementById("deckInfo") as HTMLElement).textContent =
     `${G.hand.length}/${G.handMax}`;
+}
+
+/** Card interaction: a clean click arms the card as the tool; dragging it
+ *  carries a ghost that drops the machine straight onto a board tile. */
+function cardPress(e: PointerEvent, idx: number, el: HTMLElement, card: Card) {
+  if (buildLocked()) return;
+  const sx = e.clientX, sy = e.clientY;
+  let ghost: HTMLElement | null = null;
+
+  const move = (ev: PointerEvent) => {
+    if (!ghost && Math.hypot(ev.clientX - sx, ev.clientY - sy) > 8) {
+      ui.tool = { kind: "card", idx };
+      ui.selected = null;
+      ghost = el.cloneNode(true) as HTMLElement;
+      ghost.id = "dragCard";
+      ghost.classList.remove("on");
+      ghost.style.setProperty("--fan", "rotate(0deg)");
+      document.body.appendChild(ghost);
+      paintAll();
+    }
+    if (ghost) {
+      ghost.style.left = ev.clientX - 46 + "px";
+      ghost.style.top = ev.clientY - 61 + "px";
+      hover = tileFromClient(ev.clientX, ev.clientY);
+      draw();
+    }
+  };
+  const up = (ev: PointerEvent) => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    if (ghost) {
+      ghost.remove();
+      const t = tileFromClient(ev.clientX, ev.clientY);
+      if (t && !at(t.x, t.y)) placeAt(t.x, t.y, ui.dir);
+      hover = null;
+      paintAll();
+    } else {
+      ui.tool = { kind: "card", idx };
+      ui.selected = null;
+      paintAll();
+    }
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  void card;
 }
 
 // ── the info panel: what a machine does, fed by the core's catalogue ─────────
@@ -792,11 +843,15 @@ let drag: DragState = null;
 
 const tk = (x: number, y: number) => `${x},${y}`;
 
-function toTile(ev: MouseEvent | Touch) {
+function tileFromClient(clientX: number, clientY: number) {
   const r = cv.getBoundingClientRect();
-  const x = Math.floor((ev.clientX - r.left) / TILE);
-  const y = Math.floor((ev.clientY - r.top) / TILE);
+  const x = Math.floor((clientX - r.left) / TILE);
+  const y = Math.floor((clientY - r.top) / TILE);
   return x >= 0 && y >= 0 && x < G.boardW && y < G.boardH ? { x, y } : null;
+}
+
+function toTile(ev: MouseEvent | Touch) {
+  return tileFromClient(ev.clientX, ev.clientY);
 }
 
 function commitBeltRun(path: { x: number; y: number }[]) {

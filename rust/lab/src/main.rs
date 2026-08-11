@@ -45,16 +45,16 @@ impl LaneBot {
         Self { started: Vec::new() }
     }
 
-    /// Belt path for a lane: east along the row, then down/up the spine
-    /// column to the vault row, sharing the spine with other lanes.
+    /// Drill column: lanes build COMPACT, hugging the vault. On a big board
+    /// the west-edge-to-east-edge lane of the first bot tripled its own infra
+    /// bill and measured the board, not the game.
+    const X0: i32 = SPINE - 3;
+
+    /// Belt path for a lane: a short hop to the spine column, then down/up
+    /// the spine to the vault row, sharing the spine with other lanes.
     fn belt_plan(y: i32) -> Vec<(i32, i32, Dir)> {
         let mut plan: Vec<(i32, i32, Dir)> = Vec::new();
-        for x in [1, 2, 3] {
-            plan.push((x, y, Dir::E));
-        }
-        for x in 5..SPINE {
-            plan.push((x, y, Dir::E));
-        }
+        plan.push((Self::X0 + 2, y, Dir::E));
         if y == VY {
             plan.push((SPINE, VY, Dir::E));
         } else {
@@ -109,12 +109,12 @@ impl LaneBot {
         // Open new lanes while we hold a Drill and a Furnace for one.
         while let Some(lane) = lanes().into_iter().find(|l| !self.started.contains(l)) {
             let Some(di) = g.hand.iter().position(|c| c.machine == MachineId::Drill) else { break };
-            if g.play_card(di, 0, lane, Some(Dir::E), None, None).is_err() {
+            if g.play_card(di, Self::X0, lane, Some(Dir::E), None, None).is_err() {
                 break;
             }
             self.started.push(lane);
             if let Some(fi) = g.hand.iter().position(|c| c.machine == MachineId::Furnace) {
-                let _ = g.play_card(fi, 4, lane, Some(Dir::E), None, None);
+                let _ = g.play_card(fi, Self::X0 + 1, lane, Some(Dir::E), None, None);
             }
         }
 
@@ -185,6 +185,8 @@ struct RunRecord {
     rounds_cleared: usize,
     total_delivered: i64,
     machines: usize,
+    /// Payout of each round attempted, in order.
+    payouts: Vec<i64>,
 }
 
 fn play_one(seed: u32) -> RunRecord {
@@ -207,6 +209,7 @@ fn play_one(seed: u32) -> RunRecord {
         rounds_cleared: g.history.iter().filter(|o| o.cleared).count(),
         total_delivered: g.history.iter().map(|o| o.result.payout).sum(),
         machines: g.board.len(),
+        payouts: g.history.iter().map(|o| o.result.payout).collect(),
     }
 }
 
@@ -249,6 +252,29 @@ fn batch(runs: u32, seed0: u32, jsonl: Option<&str>) {
         let bar = "█".repeat(((n as f64 / runs as f64) * 40.0).ceil() as usize);
         let quota = if i < 12 { QUOTAS[i].to_string() } else { "— (won)".into() };
         println!("  {i:>7} │ {n:>6} │ {quota:>8}  {bar}");
+    }
+
+    // The overshoot instrument: what the bot actually delivers each round
+    // versus what the quota demands. Ratios well above ~1.3 mean the round
+    // is printing free money; the quota curve should be refit from this.
+    println!();
+    println!("  round │ reached │ mean payout │ quota │ ratio");
+    println!("  ──────┼─────────┼─────────────┼───────┼──────");
+    for (r, &quota) in QUOTAS.iter().enumerate() {
+        let pays: Vec<i64> =
+            records.iter().filter_map(|rec| rec.payouts.get(r).copied()).collect();
+        if pays.is_empty() {
+            break;
+        }
+        let mean_pay = pays.iter().sum::<i64>() as f64 / pays.len() as f64;
+        println!(
+            "  {:>5} │ {:>7} │ {:>11.0} │ {:>5} │ {:>5.2}",
+            r + 1,
+            pays.len(),
+            mean_pay,
+            quota,
+            mean_pay / quota as f64
+        );
     }
 }
 

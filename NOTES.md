@@ -90,6 +90,22 @@ Third revision same day (v2.2) — chance and interplay:
   it bankrupted itself buying machines it couldn't wire in (an instructive failure —
   human players face the same trap, but they can see it).
 
+Fourth revision (v2.3) — tuning became a measured loop:
+
+- **The overshoot instrument**: the lab now prints mean payout vs quota per round. First
+  reading: the hand-authored curve paid **2.16× quota at round 1** ("you still get too many
+  points" — confirmed) then cliffed to 0.48× at round 4.
+- **The instrument had a bug worth remembering**: LaneBot built full-width lanes, so on the
+  18×18 board it measured its own belt bill, not the game. Compact building (drills 4 tiles
+  from the vault) changed measured capacity from 43/round-1 to 112. Bots measure their own
+  strategy; keep them honest before trusting the numbers.
+- **Quotas refit from measurement**: [85, 115, 145, 180, 260, 380, 550, 800, 1150, 1650,
+  2400, 3400] — ~0.75× of widening capacity at round 1 (you must place the WHOLE starting
+  kit), ~1.0 by round 3, permanently above pure widening from round 5. Starting credits 40
+  so the kit's belts are affordable. LaneBot: deaths spread over rounds 2–5, ratios
+  1.32 → 0.93 declining.
+- **Board 18×18.** Hand is a real card fan now — drag a card onto a tile to place it.
+
 Still open:
 
 1. **Rarity/weighting.** The rack is uniform over the unlocked pool. Rarity tiers change

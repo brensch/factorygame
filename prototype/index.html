@@ -74,10 +74,10 @@
   .kv{display:flex;justify-content:space-between;font-size:12px;color:var(--ink-2)}
   .kv b{color:var(--ink)}
 
-  /* ── bottom dock: tools · blueprints · run ───────────────────────────── */
+  /* ── bottom dock: tools · the hand · run ─────────────────────────────── */
   #dock{flex:none;display:flex;align-items:center;gap:8px;padding:8px 10px;
-        background:var(--surface);border-top:1px solid var(--line);flex-wrap:wrap}
-  .pal{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+        background:var(--surface);border-top:1px solid var(--line);min-height:138px}
+  .pal{display:flex;gap:6px;flex-wrap:wrap;align-items:center;max-width:130px}
   .pi{width:54px;height:58px;background:var(--surface-2);border:1px solid var(--line);
       border-radius:10px;cursor:pointer;text-align:center;position:relative;
       display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
@@ -94,6 +94,25 @@
   .divider{width:1px;height:44px;background:var(--line);flex:none}
   #deckInfo{font:600 10px var(--mono);color:var(--ink-muted);writing-mode:vertical-rl;
             text-orientation:mixed;letter-spacing:.06em}
+
+  /* the hand: real cards, fanned and hovering, drag onto the board to place */
+  #handFan{flex:1;display:flex;justify-content:center;align-items:flex-end;
+           min-width:0;height:130px;padding-top:8px}
+  .cardf{width:92px;height:122px;margin:0 -15px;flex:none;
+         background:linear-gradient(180deg,#202834,#151b24);
+         border:1px solid #2f3a49;border-radius:13px;box-shadow:0 6px 14px #0008;
+         display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;
+         cursor:grab;position:relative;text-align:center;
+         transform:var(--fan);transition:transform .13s, box-shadow .13s, border-color .13s}
+  .cardf:hover{transform:translateY(-24px) scale(1.08) rotate(0deg);z-index:9;
+         box-shadow:0 16px 30px #000c;border-color:var(--ink-muted)}
+  .cardf.on{transform:translateY(-24px) scale(1.08) rotate(0deg);z-index:8;
+         border-color:var(--ink);box-shadow:0 16px 30px #000c}
+  .cardf .sw{width:46px;height:46px;border-radius:11px;display:grid;place-items:center;
+             font:800 13px/1 var(--mono);color:#0b0e13}
+  .cardf .nm{font-size:11px;font-weight:650;color:var(--ink);line-height:1.15;max-width:82px}
+  .cardf .key{position:absolute;top:6px;left:9px;font:600 10px/1 var(--mono);color:var(--ink-muted)}
+  #dragCard{position:fixed;pointer-events:none;z-index:40;opacity:.9;margin:0}
 
   .dockbtns{display:flex;gap:6px;margin-left:auto;align-items:center}
   .dockbtns button{font-family:var(--mono);font-weight:700;cursor:pointer;border-radius:9px;
@@ -153,7 +172,12 @@
   @media(max-width:640px){
     #top{flex-wrap:wrap;row-gap:6px}
     #meterWrap{order:10;flex-basis:100%}
-    .pi{width:48px;height:52px}
+    .pi{width:44px;height:48px}
+    .pal{max-width:104px}
+    .cardf{width:74px;height:104px;margin:0 -19px}
+    .cardf .sw{width:36px;height:36px}
+    #dock{min-height:118px}
+    #handFan{height:110px}
     #info{left:6px;right:6px;bottom:6px;width:auto}
   }
 </style>
@@ -187,6 +211,7 @@
 <footer id="dock">
   <div class="pal" id="pal"></div>
   <span id="deckInfo"></span>
+  <div id="handFan"></div>
   <div class="dockbtns">
     <button id="bSpeed" title="shift speed">1×</button>
     <button id="bReset" title="clear the board">⌫</button>

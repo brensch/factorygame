@@ -10,9 +10,15 @@ use crate::defs::{def, Dir, DirectiveId, ItemType, MachineId, Tag, ITEM_TYPES, Q
 use crate::rng::Rng;
 use crate::sim::{FilterCfg, Placement, ShiftResult, Sim};
 
-pub const BOARD_W: i32 = 14;
-pub const BOARD_H: i32 = 14;
-pub const QUOTAS: [i64; 12] = [20, 45, 90, 200, 400, 700, 1200, 2400, 4500, 8000, 14000, 30000];
+pub const BOARD_W: i32 = 18;
+pub const BOARD_H: i32 = 18;
+/// Refit 2026-08-10 against the compact-building LaneBot's measured payout
+/// curve (112, 137, 151, 167, 234, 278 by round). Shape: ~0.75× of widening
+/// capacity at round 1, tightening to ~1.05× by round 4, permanently above
+/// pure widening from round 5 — multipliers, markets and doctrines carry
+/// from there. Steps ~1.25–1.45×. The previous hand-authored curve measured
+/// 2.2× free money at round 1 and a 0.48× cliff at round 4.
+pub const QUOTAS: [i64; 12] = [85, 115, 145, 180, 260, 380, 550, 800, 1150, 1650, 2400, 3400];
 /// Blueprints the hand can hold. Buying past this is refused, and so is
 /// pulling a machine off the board when there's no room for its card.
 pub const HAND_MAX: usize = 10;
@@ -20,7 +26,9 @@ pub const HAND_MAX: usize = 10;
 pub const SHOP_SIZE: usize = 5;
 /// Base reroll price, before the round multiplier and escalation.
 pub const REROLL_BASE: u32 = 2;
-pub const STARTING_CREDITS: u32 = 15;
+/// Enough to lay belts for BOTH starting lane kits — round 1's quota
+/// demands the whole kit, not half of it.
+pub const STARTING_CREDITS: u32 = 40;
 /// The spot market pays this multiple for the in-demand item.
 pub const MARKET_MULT: f64 = 2.0;
 /// Audit inspections slow the inspected tag to this fraction.

@@ -44,26 +44,26 @@ test("the shipped wasm plays a full round over the ABI", async () => {
 
   let s = read(core.boot(42));
   expect(s.phase).toBe("build");
-  expect(s.credits).toBe(15);
-  expect(s.quota).toBe(20);
+  expect(s.credits).toBe(40);
+  expect(s.quota).toBe(85);
   expect(s.board.some((p: any) => p.m === "vault")).toBe(true);
   expect(s.hand.length).toBe(4);
 
-  // Seed 42 deals 2 Drills + 2 Furnaces (pinned by the Rust tests).
-  const drill = s.hand.findIndex((c: any) => c.m === "drill");
-  s = read(core.play(drill, 0, 7, E, -1, -1));
-  expect(s.err).toBeNull();
-  const furnace = s.hand.findIndex((c: any) => c.m === "furnace");
-  s = read(core.play(furnace, 4, 7, E, -1, -1));
-  expect(s.err).toBeNull();
-  for (const x of [1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12]) {
-    s = read(core.belt(x, 7, E));
+  // Seed 42 deals 2 Drills + 2 Furnaces; build the whole kit compactly.
+  for (const y of [9, 8]) {
+    const drill = s.hand.findIndex((c: any) => c.m === "drill");
+    s = read(core.play(drill, 13, y, E, -1, -1));
     expect(s.err).toBeNull();
+    const furnace = s.hand.findIndex((c: any) => c.m === "furnace");
+    s = read(core.play(furnace, 14, y, E, -1, -1));
+    expect(s.err).toBeNull();
+    s = read(core.belt(15, y, E));
+    s = read(core.belt(16, y, y === 9 ? E : 2 /* south */));
   }
-  expect(s.credits).toBe(15 - 11); // placement is free; belts aren't
+  expect(s.credits).toBe(40 - 4); // placement is free; belts aren't
 
   const p = read(core.project());
-  expect(p.payout).toBeGreaterThanOrEqual(20);
+  expect(p.payout).toBeGreaterThanOrEqual(85);
 
   // Animate the shift to completion; items must appear along the way, and
   // deliveries must animate their final hop into the vault.
@@ -74,7 +74,7 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   for (let i = 0; i < 60; i++) {
     frame = read(core.shift_step());
     if (frame.items.length > 0) sawItems = true;
-    if (frame.hops.some((h: any) => h.x === 13 && h.y === 7)) sawVaultHop = true;
+    if (frame.hops.some((h: any) => h.x === 17 && h.y === 9)) sawVaultHop = true;
     if (frame.done) break;
   }
   expect(frame.done).toBe(true);
@@ -87,7 +87,7 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   expect(s.last.cleared).toBe(true);
   expect(s.last.payout).toBe(frame.payout); // what you watched is what you got
   expect(s.offers.length).toBe(5);
-  expect(s.nextQuota).toBe(45);
+  expect(s.nextQuota).toBe(115);
 
   // prices scale with the curve; the wire carries the chance elements
   expect(typeof s.market).toBe("string");
@@ -96,7 +96,7 @@ test("the shipped wasm plays a full round over the ABI", async () => {
   s = read(core.shop_done());
   expect(s.phase).toBe("build");
   expect(s.round).toBe(1);
-  expect(s.quota).toBe(45);
+  expect(s.quota).toBe(115);
 });
 
 test("refused commands surface err and leave state untouched", async () => {

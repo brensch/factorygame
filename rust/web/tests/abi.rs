@@ -51,8 +51,8 @@ fn field(json: &str, key: &str) -> String {
 fn a_whole_round_through_the_wire_format() {
     let s = call(boot(42));
     assert_eq!(field(&s, "phase"), "build");
-    assert_eq!(num(&s, "credits"), 15);
-    assert_eq!(num(&s, "quota"), 20);
+    assert_eq!(num(&s, "credits"), 40);
+    assert_eq!(num(&s, "quota"), 85);
     assert_eq!(field(&s, "err"), "null");
     assert!(s.contains("\"m\":\"vault\""), "vault pre-placed: {s}");
 
@@ -60,30 +60,37 @@ fn a_whole_round_through_the_wire_format() {
     let mut h = hand(&s);
     assert_eq!(h.len(), 4);
 
-    // Drill at the west edge, furnace mid-lane, belts between and out.
+    // The whole starting kit, compact by the vault: two lanes on a spine.
     let drill = h.iter().position(|m| m == "drill").unwrap();
-    let s = call(play(drill as u32, 0, 7, E, -1, -1));
+    let s = call(play(drill as u32, 13, 9, E, -1, -1));
     h = hand(&s);
     assert_eq!(h.len(), 3, "playing consumes the card");
     let furnace = h.iter().position(|m| m == "furnace").unwrap();
-    let s = call(play(furnace as u32, 4, 7, E, -1, -1));
-    assert_eq!(field(&s, "err"), "null");
-    for x in (1..=3).chain(5..=12) {
-        call(belt(x, 7, E));
-    }
+    call(play(furnace as u32, 14, 9, E, -1, -1));
+    let h2 = hand(&out_string());
+    let drill2 = h2.iter().position(|m| m == "drill").unwrap();
+    call(play(drill2 as u32, 13, 8, E, -1, -1));
+    let h3 = hand(&out_string());
+    let furnace2 = h3.iter().position(|m| m == "furnace").unwrap();
+    call(play(furnace2 as u32, 14, 8, E, -1, -1));
+    call(belt(15, 9, E));
+    call(belt(16, 9, E));
+    call(belt(15, 8, E));
+    call(belt(16, 8, 2 /* south */));
     let s = call(state());
-    assert_eq!(num(&s, "credits"), 15 - 11); // placement is free; belts aren't
+    assert_eq!(num(&s, "credits"), 40 - 4); // placement is free; belts aren't
 
     // Projection clears the quota before we commit.
     let p = call(project());
-    assert!(num(&p, "payout") >= 20, "projection: {p}");
+    assert!(num(&p, "payout") >= 85, "projection: {p}");
 
-    // Rotate is a real edit: projection collapses when the drill faces away.
-    call(rotate(0, 7));
+    // Rotate is a real edit: projection drops when a drill faces away.
+    let full = num(&p, "payout");
+    call(rotate(13, 9));
     let broken = call(project());
-    assert!(num(&broken, "payout") < 20, "drill facing south: {broken}");
+    assert!(num(&broken, "payout") < full, "drill facing south: {broken}");
     for _ in 0..3 {
-        call(rotate(0, 7));
+        call(rotate(13, 9));
     }
 
     // The animated shift: step to done, items visibly in flight on the way.
@@ -108,8 +115,8 @@ fn a_whole_round_through_the_wire_format() {
     let s = call(shift_finish());
     assert_eq!(field(&s, "phase"), "shop");
     let cleared_payout = num(&s, "payout");
-    assert!(cleared_payout >= 20);
-    assert_eq!(num(&s, "nextQuota"), 45, "shop advertises the NEXT round: {s}");
+    assert!(cleared_payout >= 85);
+    assert_eq!(num(&s, "nextQuota"), 115, "shop advertises the NEXT round: {s}");
     let offers_at = s.find("\"offers\":[").unwrap();
     let offers = &s[offers_at..offers_at + s[offers_at..].find(']').unwrap()];
     assert_eq!(offers.matches("\"name\":").count(), 5, "a full rack: {s}");
@@ -118,11 +125,9 @@ fn a_whole_round_through_the_wire_format() {
     // upcoming round, rolled while you can still shop for it.
     assert!(s.contains("\"market\":\""), "{s}");
 
-    // Prices bite now: fund a purchase by selling the two unplayed
-    // blueprints, then take whatever the rack will sell us.
-    call(sell_hand(0));
-    let s = call(sell_hand(0));
-    assert_eq!(hand(&s).len(), 0);
+    // Prices bite: take whatever the rack will sell us with the surplus.
+    let s = call(state());
+    assert_eq!(hand(&s).len(), 0, "the whole kit is on the board");
     let credits = num(&s, "credits");
     let mut bought = false;
     for i in 0..5u32 {
@@ -148,7 +153,7 @@ fn a_whole_round_through_the_wire_format() {
     let s = call(shop_done());
     assert_eq!(field(&s, "phase"), "build");
     assert_eq!(num(&s, "round"), 1);
-    assert_eq!(num(&s, "quota"), 45);
+    assert_eq!(num(&s, "quota"), 115);
     assert_eq!(hand(&s).len(), 1, "sold 2, bought 1: {s}");
 }
 
